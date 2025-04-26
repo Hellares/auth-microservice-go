@@ -1,0 +1,34 @@
+1.Iniciar ambos componentes (por defecto):
+go run main.go
+
+2.Iniciar solo la API:
+go run main.go -mode=api
+
+3.Iniciar solo el worker:
+go run main.go -mode=worker
+
+
+auth-microservice/
+├── main.go                             # Punto de entrada unificado
+├── cmd/
+│   ├── api/
+│   │   └── main.go                     # Punto de entrada de la API
+│   └── worker/
+│       └── main.go                     # Punto de entrada del worker
+├── pkg/
+│   ├── api/
+│   │   └── http/
+│   │       ├── handlers/               # Controladores HTTP
+│   │       └── server/                 # Configuración del servidor
+│   ├── application/
+│   │   ├── services/                   # Servicios de aplicación
+│   │   └── ports/                      # Interfaces para servicios externos
+│   ├── domain/
+│   │   ├── entities/                   # Entidades de dominio
+│   │   └── repositories/               # Interfaces de repositorios
+│   └── infrastructure/
+│       ├── auth/                       # Implementación de autenticación
+│       ├── messaging/                  # Integración con RabbitMQ
+│       └── persistence/                # Repositorios de datos
+└── config/
+    └── config.yaml                     # Configuración centralizada

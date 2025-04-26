@@ -1,0 +1,237 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+
+	"github.com/google/uuid"
+
+	"auth-microservice/pkg/application/services"
+	"auth-microservice/pkg/domain/entities"
+	"auth-microservice/pkg/infrastructure/messaging/rabbitmq" // Importar este paquete
+)
+
+// EventHandler maneja los eventos recibidos de RabbitMQ
+type EventHandler struct {
+	authService services.AuthService
+}
+
+// NewEventHandler crea un nuevo manejador de eventos
+func NewEventHandler(authService services.AuthService) *EventHandler {
+	return &EventHandler{
+		authService: authService,
+	}
+}
+
+// EmpresaCreatedEvent representa un evento de creación de empresa
+type EmpresaCreatedEvent struct {
+	ID               string `json:"id"`
+	RazonSocial      string `json:"razonSocial"`
+	NombreComercial  string `json:"nombreComercial"`
+	RUC              string `json:"ruc"`
+	CreadorID        string `json:"creadorId"`
+	CreadorEmail     string `json:"creadorEmail"`
+	CreadorNombre    string `json:"creadorNombre"`
+	CreadorApellido  string `json:"creadorApellido"`
+	CreadorTelefono  string `json:"creadorTelefono"`
+}
+
+// CreateEmpresaAdmin maneja el evento de creación de empresa
+func (h *EventHandler) HandleEmpresaCreated(payload []byte) error {
+	var event EmpresaCreatedEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return err
+	}
+
+	// Validar datos
+	if event.ID == "" || event.CreadorID == "" || event.CreadorEmail == "" {
+		return errors.New("datos insuficientes en el evento")
+	}
+
+	// Convertir IDs a UUID
+	empresaID, err := uuid.Parse(event.ID)
+	if err != nil {
+		return err
+	}
+
+	creadorID, err := uuid.Parse(event.CreadorID)
+	if err != nil {
+		// Si el creador no existe en el sistema de autenticación, lo creamos
+		log.Printf("Creador de empresa no encontrado, creando usuario: %s", event.CreadorEmail)
+		
+		// Generar una contraseña temporal
+		tempPassword := generateRandomPassword()
+		
+		// Registrar al usuario
+		user, err := h.authService.Register(
+			context.Background(),
+			event.CreadorEmail,
+			tempPassword,
+			event.CreadorNombre,
+			event.CreadorApellido,
+			event.CreadorTelefono,
+		)
+		
+		if err != nil {
+			return err
+		}
+		
+		creadorID = user.ID
+		
+		// Enviar email con contraseña temporal (implementación pendiente)
+		log.Printf("Usuario creado con ID: %s, se debe enviar email con password temporal", user.ID)
+	}
+
+	// Asignar rol de administrador de empresa
+	return h.authService.CreateEmpresaAdmin(context.Background(), &entities.User{ID: creadorID}, empresaID)
+}
+
+// UsuarioCreatedEvent representa un evento de creación de usuario en una empresa
+type UsuarioCreatedEvent struct {
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	FirstName   string `json:"firstName"`
+	LastName    string `json:"lastName"`
+	Phone       string `json:"phone"`
+	EmpresaID   string `json:"empresaId"`
+	RolID       string `json:"rolId"`
+}
+
+// HandleUsuarioCreated maneja el evento de creación de usuario en una empresa
+func (h *EventHandler) HandleUsuarioCreated(payload []byte) error {
+	var event UsuarioCreatedEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return err
+	}
+
+	// Validar datos
+	if event.Email == "" || event.EmpresaID == "" || event.RolID == "" {
+		return errors.New("datos insuficientes en el evento")
+	}
+
+	// Convertir IDs a UUID
+	empresaID, err := uuid.Parse(event.EmpresaID)
+	if err != nil {
+		return err
+	}
+
+	rolID, err := uuid.Parse(event.RolID)
+	if err != nil {
+		return err
+	}
+
+	// Verificar si el usuario ya existe
+	user, err := h.authService.GetUserByEmail(context.Background(), event.Email)
+	if err != nil {
+		// Si el usuario no existe, lo creamos
+		tempPassword := generateRandomPassword()
+		
+		user, err = h.authService.Register(
+			context.Background(),
+			event.Email,
+			tempPassword,
+			event.FirstName,
+			event.LastName,
+			event.Phone,
+		)
+		
+		if err != nil {
+			return err
+		}
+		
+		// Enviar email con contraseña temporal (implementación pendiente)
+		log.Printf("Usuario creado con ID: %s, se debe enviar email con password temporal", user.ID)
+	}
+
+	// Asignar rol a usuario en la empresa
+	return h.authService.AddUserToEmpresa(context.Background(), user.ID, empresaID, rolID)
+}
+
+// ClienteCreatedEvent representa un evento de creación de cliente en una empresa
+type ClienteCreatedEvent struct {
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	FirstName   string `json:"firstName"`
+	LastName    string `json:"lastName"`
+	Phone       string `json:"phone"`
+	EmpresaID   string `json:"empresaId"`
+}
+
+// HandleClienteCreated maneja el evento de creación de cliente en una empresa
+func (h *EventHandler) HandleClienteCreated(payload []byte) error {
+	var event ClienteCreatedEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return err
+	}
+
+	// Validar datos
+	if event.Email == "" || event.EmpresaID == "" {
+		return errors.New("datos insuficientes en el evento")
+	}
+
+	// Convertir IDs a UUID
+	empresaID, err := uuid.Parse(event.EmpresaID)
+	if err != nil {
+		return err
+	}
+
+	// Buscar rol de cliente
+	rolCliente, err := h.authService.GetRoleByName(context.Background(), "CLIENTE")
+	if err != nil {
+		return err
+	}
+
+	// Verificar si el cliente ya existe como usuario
+	user, err := h.authService.GetUserByEmail(context.Background(), event.Email)
+	if err != nil {
+		// Si el cliente no existe, lo creamos
+		tempPassword := generateRandomPassword()
+		
+		user, err = h.authService.Register(
+			context.Background(),
+			event.Email,
+			tempPassword,
+			event.FirstName,
+			event.LastName,
+			event.Phone,
+		)
+		
+		if err != nil {
+			return err
+		}
+		
+		// Enviar email con contraseña temporal (implementación pendiente)
+		log.Printf("Cliente creado con ID: %s, se debe enviar email con password temporal", user.ID)
+	}
+
+	// Asignar rol de cliente en la empresa
+	return h.authService.AddUserToEmpresa(context.Background(), user.ID, empresaID, rolCliente.ID)
+}
+
+// generateRandomPassword genera una contraseña aleatoria
+func generateRandomPassword() string {
+	// Implementación simple para ejemplo. En producción, usar algo más seguro.
+	return uuid.New().String()[:8]
+}
+
+// RegisterEventHandlers registra todos los manejadores de eventos
+func RegisterEventHandlers(eventBus rabbitmq.EventBus, handler *EventHandler) error {
+	// Suscribirse a eventos de creación de empresa
+	if err := eventBus.Subscribe("empresa.created", handler.HandleEmpresaCreated); err != nil {
+		return err
+	}
+
+	// Suscribirse a eventos de creación de usuario
+	if err := eventBus.Subscribe("usuario.created", handler.HandleUsuarioCreated); err != nil {
+		return err
+	}
+
+	// Suscribirse a eventos de creación de cliente
+	if err := eventBus.Subscribe("cliente.created", handler.HandleClienteCreated); err != nil {
+		return err
+	}
+
+	return nil
+}
