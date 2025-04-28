@@ -3,11 +3,14 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 
+	"auth-microservice/pkg/application/ports"
 	"auth-microservice/pkg/domain/entities"
 	"auth-microservice/pkg/domain/repositories"
 	"auth-microservice/pkg/infrastructure/auth"
@@ -15,9 +18,9 @@ import (
 
 // AuthService define la interfaz del servicio de autenticación
 type AuthService interface {
-	Register(ctx context.Context, email, password, firstName, lastName, phone string) (*entities.User, error)
-	Login(ctx context.Context, email, password string) (string, error)
-	VerifyToken(ctx context.Context, token string) (*TokenClaims, error)
+	Register(ctx context.Context, dni, email, password, firstName, lastName, phone string) (*entities.User, error)
+	Login(ctx context.Context, dni, password string) (string, error)
+	VerifyToken(ctx context.Context, token string) (*auth.TokenClaims, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (*entities.User, error)
 	ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) error
 	RequestPasswordReset(ctx context.Context, email string) (*entities.VerificationToken, error)
@@ -29,15 +32,9 @@ type AuthService interface {
 	RemoveUserFromEmpresa(ctx context.Context, userID, empresaID uuid.UUID) error
 	GetUserRoles(ctx context.Context, userID, empresaID uuid.UUID) ([]*entities.Role, error)
 	HasPermission(ctx context.Context, userID, empresaID uuid.UUID, permissionName string) (bool, error)
+	GetUserByDNI(ctx context.Context, dni string) (*entities.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*entities.User, error)
 	GetRoleByName(ctx context.Context, name string) (*entities.Role, error)
-}
-
-// TokenClaims son los datos que se incluyen en el JWT
-type TokenClaims struct {
-	UserID    string `json:"userId"`
-	Email     string `json:"email"`
-	ExpiresAt int64  `json:"exp"`
 }
 
 // authServiceImpl implementa la interfaz AuthService
@@ -48,8 +45,9 @@ type authServiceImpl struct {
 	userEmpresaRoleRepo   repositories.UserEmpresaRoleRepository
 	verificationTokenRepo repositories.VerificationTokenRepository
 	sessionRepo           repositories.SessionRepository
-	jwtService            *auth.JWTService  // Reemplaza jwtSecret
+	jwtService            *auth.JWTService // Reemplaza jwtSecret
 	tokenExpiration       time.Duration
+	emailSender           ports.EmailSender
 }
 
 // NewAuthService crea una nueva instancia del servicio de autenticación
@@ -62,6 +60,7 @@ func NewAuthService(
 	sessionRepo repositories.SessionRepository,
 	jwtSecret string,
 	tokenExpiration time.Duration,
+	emailSender ports.EmailSender,
 ) AuthService {
 	jwtService := auth.NewJWTService(jwtSecret, tokenExpiration)
 
@@ -74,15 +73,28 @@ func NewAuthService(
 		sessionRepo:           sessionRepo,
 		jwtService:            jwtService,
 		tokenExpiration:       tokenExpiration,
+		emailSender:           emailSender,
 	}
 }
 
 // Register registra un nuevo usuario
-func (s *authServiceImpl) Register(ctx context.Context, email, password, firstName, lastName, phone string) (*entities.User, error) {
+func (s *authServiceImpl) Register(ctx context.Context, dni, email, password, firstName, lastName, phone string) (*entities.User, error) {
+	// Verificar si el DNI ya está registrado
+	existingUser, err := s.userRepo.FindByDNI(ctx, dni)
+	if err == nil && existingUser != nil {
+		return nil, errors.New("el DNI ya está registrado")
+	}
+
 	// Verificar si el email ya está registrado
-	existingUser, err := s.userRepo.FindByEmail(ctx, email)
+	existingUser, err = s.userRepo.FindByEmail(ctx, email)
 	if err == nil && existingUser != nil {
 		return nil, errors.New("el email ya está registrado")
+	}
+
+	// Verificar si el teléfono ya está registrado
+	existingUser, err = s.userRepo.FindByPhone(ctx, phone)
+	if err == nil && existingUser != nil {
+		return nil, errors.New("el número de teléfono ya está registrado")
 	}
 
 	// Hash de la contraseña
@@ -93,6 +105,7 @@ func (s *authServiceImpl) Register(ctx context.Context, email, password, firstNa
 
 	user := &entities.User{
 		ID:        uuid.New(),
+		DNI:       dni,
 		Email:     email,
 		Password:  string(hashedPassword),
 		FirstName: firstName,
@@ -109,23 +122,25 @@ func (s *authServiceImpl) Register(ctx context.Context, email, password, firstNa
 	}
 
 	// Generar token de verificación de email
-	_, err = s.CreateVerificationToken(ctx, user.ID, entities.TokenTypeEmailVerification)
+	verificationToken, err := s.CreateVerificationToken(ctx, user.ID, entities.TokenTypeEmailVerification)
 	if err != nil {
+		return nil, err
+	}
+
+	// Enviar email de verificación
+	if err := s.emailSender.SendVerificationEmail(user, verificationToken.Token); err != nil {
 		return nil, err
 	}
 
 	return user, nil
 }
 
-// Login autentica a un usuario y devuelve un token JWT
-func (s *authServiceImpl) Login(ctx context.Context, email, password string) (string, error) {
-	user, err := s.userRepo.FindByEmail(ctx, email)
+// Login autentica a un usuario
+func (s *authServiceImpl) Login(ctx context.Context, dni, password string) (string, error) {
+	// Buscar usuario por DNI
+	user, err := s.userRepo.FindByDNI(ctx, dni)
 	if err != nil {
 		return "", errors.New("credenciales inválidas")
-	}
-
-	if user.Status != entities.UserStatusActive {
-		return "", errors.New("usuario inactivo o bloqueado")
 	}
 
 	// Verificar contraseña
@@ -133,88 +148,40 @@ func (s *authServiceImpl) Login(ctx context.Context, email, password string) (st
 		return "", errors.New("credenciales inválidas")
 	}
 
-	// Actualizar último inicio de sesión
-	if err := s.userRepo.UpdateLastLogin(ctx, user.ID); err != nil {
-		return "", err
+	// Crear claims para el token JWT
+	claims := &auth.TokenClaims{
+		UserID: user.ID.String(),
+		DNI:    user.DNI,
+		Email:  user.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.tokenExpiration)),
+		},
 	}
 
-	// Generar token JWT usando el servicio
-	tokenString, err := s.jwtService.GenerateToken(user.ID, user.Email)
+	// Generar token JWT
+	token, err := s.jwtService.GenerateToken(claims)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("error al generar el token: %v", err)
 	}
-
-	
 
 	// Crear sesión
 	session := &entities.Session{
 		ID:        uuid.New(),
 		UserID:    user.ID,
-		Token:     tokenString,
+		Token:     token,
 		ExpiresAt: time.Now().Add(s.tokenExpiration),
 		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
 	}
 
 	if err := s.sessionRepo.Create(ctx, session); err != nil {
-		return "", err
+		return "", fmt.Errorf("error al crear la sesión: %v", err)
 	}
 
-	return tokenString, nil
+	return token, nil
 }
 
 // VerifyToken verifica un token JWT y devuelve los claims
-// func (s *authServiceImpl) VerifyToken(ctx context.Context, tokenString string) (*TokenClaims, error) {
-// 	// Verificar si el token existe en la base de datos
-// 	session, err := s.sessionRepo.FindByToken(ctx, tokenString)
-// 	if err != nil || session == nil || time.Now().After(session.ExpiresAt) {
-// 		return nil, errors.New("token inválido o expirado")
-// 	}
-
-// 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-// 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-// 			return nil, errors.New("método de firma inesperado")
-// 		}
-// 		return s.jwtSecret, nil
-// 	})
-
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	if !token.Valid {
-// 		return nil, errors.New("token inválido")
-// 	}
-
-// 	claims, ok := token.Claims.(jwt.MapClaims)
-// 	if !ok {
-// 		return nil, errors.New("no se pudieron extraer los claims del token")
-// 	}
-
-// 	userID, ok := claims["userId"].(string)
-// 	if !ok {
-// 		return nil, errors.New("no se pudo extraer el ID de usuario del token")
-// 	}
-
-// 	email, ok := claims["email"].(string)
-// 	if !ok {
-// 		return nil, errors.New("no se pudo extraer el email del token")
-// 	}
-
-// 	exp, ok := claims["exp"].(float64)
-// 	if !ok {
-// 		return nil, errors.New("no se pudo extraer la fecha de expiración del token")
-// 	}
-
-// 	return &TokenClaims{
-// 		UserID:    userID,
-// 		Email:     email,
-// 		ExpiresAt: int64(exp),
-// 	}, nil
-// }
-
-// Modificar el método VerifyToken para usar jwtService
-func (s *authServiceImpl) VerifyToken(ctx context.Context, tokenString string) (*TokenClaims, error) {
+func (s *authServiceImpl) VerifyToken(ctx context.Context, tokenString string) (*auth.TokenClaims, error) {
 	// Verificar si el token existe en la base de datos
 	session, err := s.sessionRepo.FindByToken(ctx, tokenString)
 	if err != nil || session == nil || time.Now().After(session.ExpiresAt) {
@@ -227,11 +194,7 @@ func (s *authServiceImpl) VerifyToken(ctx context.Context, tokenString string) (
 		return nil, err
 	}
 
-	return &TokenClaims{
-		UserID:    claims.UserID,
-		Email:     claims.Email,
-		ExpiresAt: claims.ExpiresAt.Unix(),
-	}, nil
+	return claims, nil
 }
 
 // GetUserByID obtiene un usuario por su ID
@@ -276,7 +239,17 @@ func (s *authServiceImpl) RequestPasswordReset(ctx context.Context, email string
 	}
 
 	// Crear nuevo token de reseteo
-	return s.CreateVerificationToken(ctx, user.ID, entities.TokenTypePasswordReset)
+	token, err := s.CreateVerificationToken(ctx, user.ID, entities.TokenTypePasswordReset)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enviar email con el token
+	if err := s.emailSender.SendPasswordResetEmail(user, token.Token); err != nil {
+		return nil, err
+	}
+
+	return token, nil
 }
 
 // ResetPassword resetea la contraseña de un usuario usando un token
@@ -314,7 +287,7 @@ func (s *authServiceImpl) CreateVerificationToken(ctx context.Context, userID uu
 	// Generar token aleatorio
 	tokenUUID := uuid.New()
 	token := tokenUUID.String()
-	
+
 	// Definir expiración (24 horas para verificación de email, 1 hora para reseteo de contraseña)
 	var expiresAt time.Time
 	if tokenType == entities.TokenTypeEmailVerification {
@@ -322,7 +295,7 @@ func (s *authServiceImpl) CreateVerificationToken(ctx context.Context, userID uu
 	} else {
 		expiresAt = time.Now().Add(1 * time.Hour)
 	}
-	
+
 	verificationToken := &entities.VerificationToken{
 		ID:        uuid.New(),
 		UserID:    userID,
@@ -331,11 +304,11 @@ func (s *authServiceImpl) CreateVerificationToken(ctx context.Context, userID uu
 		ExpiresAt: expiresAt,
 		CreatedAt: time.Now(),
 	}
-	
+
 	if err := s.verificationTokenRepo.Create(ctx, verificationToken); err != nil {
 		return nil, err
 	}
-	
+
 	return verificationToken, nil
 }
 
@@ -345,20 +318,20 @@ func (s *authServiceImpl) VerifyEmail(ctx context.Context, token string) error {
 	if err != nil {
 		return errors.New("token inválido")
 	}
-	
+
 	if verificationToken.Type != entities.TokenTypeEmailVerification {
 		return errors.New("tipo de token incorrecto")
 	}
-	
+
 	if time.Now().After(verificationToken.ExpiresAt) {
 		return errors.New("token expirado")
 	}
-	
+
 	// Marcar email como verificado
 	if err := s.userRepo.VerifyEmail(ctx, verificationToken.UserID); err != nil {
 		return err
 	}
-	
+
 	// Eliminar token usado
 	return s.verificationTokenRepo.Delete(ctx, verificationToken.ID)
 }
@@ -370,7 +343,7 @@ func (s *authServiceImpl) CreateEmpresaAdmin(ctx context.Context, user *entities
 	if err != nil {
 		return err
 	}
-	
+
 	// Asignar rol de administrador al usuario para la empresa
 	userEmpresaRole := &entities.UserEmpresaRole{
 		ID:        uuid.New(),
@@ -381,7 +354,7 @@ func (s *authServiceImpl) CreateEmpresaAdmin(ctx context.Context, user *entities
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
-	
+
 	return s.userEmpresaRoleRepo.Create(ctx, userEmpresaRole)
 }
 
@@ -392,13 +365,13 @@ func (s *authServiceImpl) AddUserToEmpresa(ctx context.Context, userID, empresaI
 	if err != nil {
 		return err
 	}
-	
+
 	// Verificar que el rol existe
 	role, err := s.roleRepo.FindByID(ctx, roleID)
 	if err != nil {
 		return err
 	}
-	
+
 	// Verificar si ya existe esta relación
 	existingRoles, err := s.userEmpresaRoleRepo.FindByUserAndEmpresa(ctx, userID, empresaID)
 	if err == nil && len(existingRoles) > 0 {
@@ -408,7 +381,7 @@ func (s *authServiceImpl) AddUserToEmpresa(ctx context.Context, userID, empresaI
 			}
 		}
 	}
-	
+
 	// Crear la relación usuario-empresa-rol
 	userEmpresaRole := &entities.UserEmpresaRole{
 		ID:        uuid.New(),
@@ -419,7 +392,7 @@ func (s *authServiceImpl) AddUserToEmpresa(ctx context.Context, userID, empresaI
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
-	
+
 	return s.userEmpresaRoleRepo.Create(ctx, userEmpresaRole)
 }
 
@@ -429,13 +402,13 @@ func (s *authServiceImpl) RemoveUserFromEmpresa(ctx context.Context, userID, emp
 	if err != nil {
 		return err
 	}
-	
+
 	for _, rel := range relationships {
 		if err := s.userEmpresaRoleRepo.Delete(ctx, rel.ID); err != nil {
 			return err
 		}
 	}
-	
+
 	return nil
 }
 
@@ -451,22 +424,27 @@ func (s *authServiceImpl) HasPermission(ctx context.Context, userID, empresaID u
 	if err != nil {
 		return false, err
 	}
-	
+
 	// Para cada rol, verificar si tiene el permiso
 	for _, role := range roles {
 		permissions, err := s.permissionRepo.FindByRole(ctx, role.ID)
 		if err != nil {
 			continue
 		}
-		
+
 		for _, permission := range permissions {
 			if permission.Name == permissionName {
 				return true, nil
 			}
 		}
 	}
-	
+
 	return false, nil
+}
+
+// GetUserByDNI obtiene un usuario por su DNI
+func (s *authServiceImpl) GetUserByDNI(ctx context.Context, dni string) (*entities.User, error) {
+	return s.userRepo.FindByDNI(ctx, dni)
 }
 
 // GetUserByEmail obtiene un usuario por su email

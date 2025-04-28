@@ -27,15 +27,16 @@ func NewEventHandler(authService services.AuthService) *EventHandler {
 
 // EmpresaCreatedEvent representa un evento de creación de empresa
 type EmpresaCreatedEvent struct {
-	ID               string `json:"id"`
-	RazonSocial      string `json:"razonSocial"`
-	NombreComercial  string `json:"nombreComercial"`
-	RUC              string `json:"ruc"`
-	CreadorID        string `json:"creadorId"`
-	CreadorEmail     string `json:"creadorEmail"`
-	CreadorNombre    string `json:"creadorNombre"`
-	CreadorApellido  string `json:"creadorApellido"`
-	CreadorTelefono  string `json:"creadorTelefono"`
+	ID              string `json:"id"`
+	RazonSocial     string `json:"razonSocial"`
+	NombreComercial string `json:"nombreComercial"`
+	RUC             string `json:"ruc"`
+	CreadorID       string `json:"creadorId"`
+	CreadorDNI      string `json:"creadorDni"`
+	CreadorEmail    string `json:"creadorEmail"`
+	CreadorNombre   string `json:"creadorNombre"`
+	CreadorApellido string `json:"creadorApellido"`
+	CreadorTelefono string `json:"creadorTelefono"`
 }
 
 // CreateEmpresaAdmin maneja el evento de creación de empresa
@@ -46,7 +47,7 @@ func (h *EventHandler) HandleEmpresaCreated(payload []byte) error {
 	}
 
 	// Validar datos
-	if event.ID == "" || event.CreadorID == "" || event.CreadorEmail == "" {
+	if event.ID == "" || event.CreadorID == "" || event.CreadorEmail == "" || event.CreadorDNI == "" {
 		return errors.New("datos insuficientes en el evento")
 	}
 
@@ -60,26 +61,27 @@ func (h *EventHandler) HandleEmpresaCreated(payload []byte) error {
 	if err != nil {
 		// Si el creador no existe en el sistema de autenticación, lo creamos
 		log.Printf("Creador de empresa no encontrado, creando usuario: %s", event.CreadorEmail)
-		
+
 		// Generar una contraseña temporal
 		tempPassword := generateRandomPassword()
-		
+
 		// Registrar al usuario
 		user, err := h.authService.Register(
 			context.Background(),
+			event.CreadorDNI,
 			event.CreadorEmail,
 			tempPassword,
 			event.CreadorNombre,
 			event.CreadorApellido,
 			event.CreadorTelefono,
 		)
-		
+
 		if err != nil {
 			return err
 		}
-		
+
 		creadorID = user.ID
-		
+
 		// Enviar email con contraseña temporal (implementación pendiente)
 		log.Printf("Usuario creado con ID: %s, se debe enviar email con password temporal", user.ID)
 	}
@@ -90,13 +92,14 @@ func (h *EventHandler) HandleEmpresaCreated(payload []byte) error {
 
 // UsuarioCreatedEvent representa un evento de creación de usuario en una empresa
 type UsuarioCreatedEvent struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	FirstName   string `json:"firstName"`
-	LastName    string `json:"lastName"`
-	Phone       string `json:"phone"`
-	EmpresaID   string `json:"empresaId"`
-	RolID       string `json:"rolId"`
+	ID        string `json:"id"`
+	DNI       string `json:"dni"`
+	Email     string `json:"email"`
+	FirstName string `json:"firstName"`
+	LastName  string `json:"lastName"`
+	Phone     string `json:"phone"`
+	EmpresaID string `json:"empresaId"`
+	RolID     string `json:"rolId"`
 }
 
 // HandleUsuarioCreated maneja el evento de creación de usuario en una empresa
@@ -107,7 +110,7 @@ func (h *EventHandler) HandleUsuarioCreated(payload []byte) error {
 	}
 
 	// Validar datos
-	if event.Email == "" || event.EmpresaID == "" || event.RolID == "" {
+	if event.DNI == "" || event.Email == "" || event.EmpresaID == "" || event.RolID == "" {
 		return errors.New("datos insuficientes en el evento")
 	}
 
@@ -123,24 +126,25 @@ func (h *EventHandler) HandleUsuarioCreated(payload []byte) error {
 	}
 
 	// Verificar si el usuario ya existe
-	user, err := h.authService.GetUserByEmail(context.Background(), event.Email)
+	user, err := h.authService.GetUserByDNI(context.Background(), event.DNI)
 	if err != nil {
 		// Si el usuario no existe, lo creamos
 		tempPassword := generateRandomPassword()
-		
+
 		user, err = h.authService.Register(
 			context.Background(),
+			event.DNI,
 			event.Email,
 			tempPassword,
 			event.FirstName,
 			event.LastName,
 			event.Phone,
 		)
-		
+
 		if err != nil {
 			return err
 		}
-		
+
 		// Enviar email con contraseña temporal (implementación pendiente)
 		log.Printf("Usuario creado con ID: %s, se debe enviar email con password temporal", user.ID)
 	}
@@ -151,12 +155,13 @@ func (h *EventHandler) HandleUsuarioCreated(payload []byte) error {
 
 // ClienteCreatedEvent representa un evento de creación de cliente en una empresa
 type ClienteCreatedEvent struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	FirstName   string `json:"firstName"`
-	LastName    string `json:"lastName"`
-	Phone       string `json:"phone"`
-	EmpresaID   string `json:"empresaId"`
+	ID        string `json:"id"`
+	DNI       string `json:"dni"`
+	Email     string `json:"email"`
+	FirstName string `json:"firstName"`
+	LastName  string `json:"lastName"`
+	Phone     string `json:"phone"`
+	EmpresaID string `json:"empresaId"`
 }
 
 // HandleClienteCreated maneja el evento de creación de cliente en una empresa
@@ -167,7 +172,7 @@ func (h *EventHandler) HandleClienteCreated(payload []byte) error {
 	}
 
 	// Validar datos
-	if event.Email == "" || event.EmpresaID == "" {
+	if event.DNI == "" || event.Email == "" || event.EmpresaID == "" {
 		return errors.New("datos insuficientes en el evento")
 	}
 
@@ -184,24 +189,25 @@ func (h *EventHandler) HandleClienteCreated(payload []byte) error {
 	}
 
 	// Verificar si el cliente ya existe como usuario
-	user, err := h.authService.GetUserByEmail(context.Background(), event.Email)
+	user, err := h.authService.GetUserByDNI(context.Background(), event.DNI)
 	if err != nil {
 		// Si el cliente no existe, lo creamos
 		tempPassword := generateRandomPassword()
-		
+
 		user, err = h.authService.Register(
 			context.Background(),
+			event.DNI,
 			event.Email,
 			tempPassword,
 			event.FirstName,
 			event.LastName,
 			event.Phone,
 		)
-		
+
 		if err != nil {
 			return err
 		}
-		
+
 		// Enviar email con contraseña temporal (implementación pendiente)
 		log.Printf("Cliente creado con ID: %s, se debe enviar email con password temporal", user.ID)
 	}

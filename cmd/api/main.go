@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
-	
+
 	// Driver de PostgreSQL (importación necesaria aunque no se use directamente)
 	_ "github.com/lib/pq"
 
 	"auth-microservice/pkg/api/http/server"
+	"auth-microservice/pkg/infrastructure/email"
 )
 
 func main() {
@@ -36,24 +37,53 @@ func main() {
 	}
 	defer db.Close()
 
-	// Inicializar servicios
-	authService := server.InitializeServices(db)
+	// Configurar servicio de email
+	emailConfig := email.SMTPConfig{
+		Host:     viper.GetString("smtp.host"),
+		Port:     viper.GetInt("smtp.port"),
+		Username: viper.GetString("smtp.username"),
+		Password: viper.GetString("smtp.password"),
+		From:     viper.GetString("smtp.from"),
+	}
 
-	// Inicializar router y handlers
+	emailSender := email.NewSMTPEmailSender(
+		emailConfig,
+		viper.GetString("urls.reset_password"),
+		viper.GetString("urls.verify_email"),
+		viper.GetString("site.name"),
+		viper.GetString("site.url"),
+		viper.GetString("site.support_email"),
+	)
+
+	// Inicializar servicios
+	authService := server.InitializeServices(db, emailSender)
+
+	// Configurar router usando la función de server
 	router := server.SetupRouter(authService)
 
 	// Iniciar el servidor HTTP
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%s", viper.GetString("server.port")),
-		Handler:      router,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+	port := viper.GetString("server.port")
+	if port == "" {
+		port = "8080" // Puerto por defecto si no está configurado
 	}
+
+	// Para desarrollo (localhost)
+	srv := &http.Server{
+		Addr:         fmt.Sprintf("localhost:%s", port),
+		Handler:      router,
+		ReadTimeout:  viper.GetDuration("server.read_timeout"),
+		WriteTimeout: viper.GetDuration("server.write_timeout"),
+		IdleTimeout:  viper.GetDuration("server.idle_timeout"),
+	}
+
+	// Para producción, cambiar la configuración del servidor:
+	// 1. Cambiar Addr a fmt.Sprintf(":%s", port) para escuchar en todas las interfaces
+	// 2. Considerar usar srv.ListenAndServeTLS() para HTTPS
+	// 3. Agregar certificados SSL
 
 	// Iniciar el servidor en una goroutine para no bloquear
 	go func() {
-		log.Printf("Servidor API escuchando en %s", srv.Addr)
+		log.Printf("Servidor API escuchando en http://localhost:%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Error al iniciar el servidor: %v", err)
 		}

@@ -34,7 +34,7 @@ func NewAuthHandler(authService services.AuthService) *AuthHandler {
 func (h *AuthHandler) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/register", h.Register).Methods("POST")
 	router.HandleFunc("/login", h.Login).Methods("POST")
-	router.HandleFunc("/verify-email", h.VerifyEmail).Methods("POST")
+	router.HandleFunc("/verify-email", h.VerifyEmail).Methods("GET", "POST")
 	router.HandleFunc("/request-password-reset", h.RequestPasswordReset).Methods("POST")
 	router.HandleFunc("/reset-password", h.ResetPassword).Methods("POST")
 	router.HandleFunc("/change-password", h.ChangePassword).Methods("POST")
@@ -48,6 +48,7 @@ func (h *AuthHandler) RegisterRoutes(router *mux.Router) {
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	// Estructura para la petición
 	var req struct {
+		DNI       string `json:"dni"`
 		Email     string `json:"email"`
 		Password  string `json:"password"`
 		FirstName string `json:"firstName"`
@@ -63,13 +64,13 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validar datos
-	if req.Email == "" || req.Password == "" || req.FirstName == "" || req.LastName == "" {
+	if req.DNI == "" || req.Email == "" || req.Password == "" || req.FirstName == "" || req.LastName == "" {
 		respondWithError(w, http.StatusBadRequest, "Campos requeridos faltantes")
 		return
 	}
 
 	// Registrar usuario
-	user, err := h.authService.Register(r.Context(), req.Email, req.Password, req.FirstName, req.LastName, req.Phone)
+	user, err := h.authService.Register(r.Context(), req.DNI, req.Email, req.Password, req.FirstName, req.LastName, req.Phone)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, err.Error())
 		return
@@ -87,7 +88,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	// Estructura para la petición
 	var req struct {
-		Email    string `json:"email"`
+		DNI      string `json:"dni"`
 		Password string `json:"password"`
 	}
 
@@ -99,13 +100,13 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validar datos
-	if req.Email == "" || req.Password == "" {
-		respondWithError(w, http.StatusBadRequest, "Email y contraseña son requeridos")
+	if req.DNI == "" || req.Password == "" {
+		respondWithError(w, http.StatusBadRequest, "DNI y contraseña son requeridos")
 		return
 	}
 
 	// Iniciar sesión
-	token, err := h.authService.Login(r.Context(), req.Email, req.Password)
+	token, err := h.authService.Login(r.Context(), req.DNI, req.Password)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, err.Error())
 		return
@@ -122,32 +123,43 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 // VerifyEmail verifica el email de un usuario
 func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
-	// Estructura para la petición
-	var req struct {
-		Token string `json:"token"`
+	var token string
+
+	// Obtener token dependiendo del método HTTP
+	if r.Method == "GET" {
+		token = r.URL.Query().Get("token")
+	} else {
+		// Para POST, decodificar JSON del body
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondWithError(w, http.StatusBadRequest, "Petición inválida")
+			return
+		}
+		token = req.Token
 	}
 
-	// Decodificar JSON
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Petición inválida")
-		return
-	}
-
-	// Validar datos
-	if req.Token == "" {
+	// Validar token
+	if token == "" {
 		respondWithError(w, http.StatusBadRequest, "Token requerido")
 		return
 	}
 
 	// Verificar email
-	err = h.authService.VerifyEmail(r.Context(), req.Token)
+	err := h.authService.VerifyEmail(r.Context(), token)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Responder con éxito
+	// Si es GET, redirigir a una página de éxito
+	if r.Method == "GET" {
+		http.Redirect(w, r, "/email-verified.html", http.StatusSeeOther)
+		return
+	}
+
+	// Para POST, responder con JSON
 	respondWithJSON(w, http.StatusOK, Response{
 		Success: true,
 		Message: "Email verificado con éxito",
@@ -447,10 +459,10 @@ func (h *AuthHandler) GetUserPermissions(w http.ResponseWriter, r *http.Request)
 
 	// Obtener los permisos que queremos comprobar de los query params
 	perms := r.URL.Query()["permission"]
-	
+
 	// Mapa para almacenar los resultados
 	permResults := make(map[string]bool)
-	
+
 	// Comprobar cada permiso
 	for _, perm := range perms {
 		hasPermission, err := h.authService.HasPermission(r.Context(), userID, empresaID, perm)

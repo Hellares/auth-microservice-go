@@ -16,6 +16,7 @@ const (
 
 type User struct {
 	ID        uuid.UUID  `json:"id"`
+	DNI       string     `json:"dni"`
 	Email     string     `json:"email"`
 	Password  string     `json:"-"` // No enviamos la contraseña en respuestas JSON
 	FirstName string     `json:"firstName"`

@@ -26,10 +26,10 @@ func NewUserRepository(db *sqlx.DB) *userRepository {
 func (r *userRepository) Create(ctx context.Context, user *entities.User) error {
 	query := `
 		INSERT INTO users (
-			id, email, password, first_name, last_name, phone, avatar_url, 
+			id, dni, email, password, first_name, last_name, phone, avatar_url, 
 			status, verified, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		)
 	`
 
@@ -37,6 +37,7 @@ func (r *userRepository) Create(ctx context.Context, user *entities.User) error 
 		ctx,
 		query,
 		user.ID,
+		user.DNI,
 		user.Email,
 		user.Password,
 		user.FirstName,
@@ -55,7 +56,7 @@ func (r *userRepository) Create(ctx context.Context, user *entities.User) error 
 func (r *userRepository) FindByID(ctx context.Context, id uuid.UUID) (*entities.User, error) {
 	query := `
 		SELECT 
-			id, email, password, first_name, last_name, phone, avatar_url, 
+			id, dni, email, password, first_name, last_name, phone, avatar_url, 
 			status, verified, last_login, created_at, updated_at
 		FROM users
 		WHERE id = $1
@@ -66,6 +67,49 @@ func (r *userRepository) FindByID(ctx context.Context, id uuid.UUID) (*entities.
 
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&user.ID,
+		&user.DNI,
+		&user.Email,
+		&user.Password,
+		&user.FirstName,
+		&user.LastName,
+		&user.Phone,
+		&user.AvatarURL,
+		&user.Status,
+		&user.Verified,
+		&lastLogin,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, errors.New("usuario no encontrado")
+		}
+		return nil, err
+	}
+
+	if lastLogin.Valid {
+		user.LastLogin = &lastLogin.Time
+	}
+
+	return &user, nil
+}
+
+func (r *userRepository) FindByDNI(ctx context.Context, dni string) (*entities.User, error) {
+	query := `
+		SELECT 
+			id, dni, email, password, first_name, last_name, phone, avatar_url, 
+			status, verified, last_login, created_at, updated_at
+		FROM users
+		WHERE dni = $1
+	`
+
+	var user entities.User
+	var lastLogin sql.NullTime
+
+	err := r.db.QueryRowContext(ctx, query, dni).Scan(
+		&user.ID,
+		&user.DNI,
 		&user.Email,
 		&user.Password,
 		&user.FirstName,
@@ -96,7 +140,7 @@ func (r *userRepository) FindByID(ctx context.Context, id uuid.UUID) (*entities.
 func (r *userRepository) FindByEmail(ctx context.Context, email string) (*entities.User, error) {
 	query := `
 		SELECT 
-			id, email, password, first_name, last_name, phone, avatar_url, 
+			id, dni, email, password, first_name, last_name, phone, avatar_url, 
 			status, verified, last_login, created_at, updated_at
 		FROM users
 		WHERE email = $1
@@ -107,6 +151,49 @@ func (r *userRepository) FindByEmail(ctx context.Context, email string) (*entiti
 
 	err := r.db.QueryRowContext(ctx, query, email).Scan(
 		&user.ID,
+		&user.DNI,
+		&user.Email,
+		&user.Password,
+		&user.FirstName,
+		&user.LastName,
+		&user.Phone,
+		&user.AvatarURL,
+		&user.Status,
+		&user.Verified,
+		&lastLogin,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, errors.New("usuario no encontrado")
+		}
+		return nil, err
+	}
+
+	if lastLogin.Valid {
+		user.LastLogin = &lastLogin.Time
+	}
+
+	return &user, nil
+}
+
+func (r *userRepository) FindByPhone(ctx context.Context, phone string) (*entities.User, error) {
+	query := `
+		SELECT 
+			id, dni, email, password, first_name, last_name, phone, avatar_url, 
+			status, verified, last_login, created_at, updated_at
+		FROM users
+		WHERE phone = $1
+	`
+
+	var user entities.User
+	var lastLogin sql.NullTime
+
+	err := r.db.QueryRowContext(ctx, query, phone).Scan(
+		&user.ID,
+		&user.DNI,
 		&user.Email,
 		&user.Password,
 		&user.FirstName,
@@ -284,4 +371,3 @@ func (r *userRepository) UpdateLastLogin(ctx context.Context, id uuid.UUID) erro
 	_, err := r.db.ExecContext(ctx, query, time.Now(), time.Now(), id)
 	return err
 }
-

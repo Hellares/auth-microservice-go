@@ -14,9 +14,9 @@ import (
 	"github.com/spf13/viper"
 
 	"auth-microservice/pkg/api/http/server"
-	// "auth-microservice/pkg/application/services"
-	"auth-microservice/pkg/infrastructure/messaging/rabbitmq"
+	"auth-microservice/pkg/infrastructure/email"
 	msgHandlers "auth-microservice/pkg/infrastructure/messaging/handlers"
+	"auth-microservice/pkg/infrastructure/messaging/rabbitmq"
 )
 
 func main() {
@@ -36,8 +36,26 @@ func main() {
 	}
 	defer db.Close()
 
+	// Configurar servicio de correo electrónico
+	emailConfig := email.SMTPConfig{
+		Host:     viper.GetString("smtp.host"),
+		Port:     viper.GetInt("smtp.port"),
+		Username: viper.GetString("smtp.username"),
+		Password: viper.GetString("smtp.password"),
+		From:     viper.GetString("smtp.from"),
+	}
+
+	emailSender := email.NewSMTPEmailSender(
+		emailConfig,
+		viper.GetString("urls.reset_password"),
+		viper.GetString("urls.verify_email"),
+		viper.GetString("site.name"),
+		viper.GetString("site.url"),
+		viper.GetString("site.support_email"),
+	)
+
 	// Inicializar servicios
-	authService := server.InitializeServices(db)
+	authService := server.InitializeServices(db, emailSender)
 
 	// Conectar a RabbitMQ
 	eventBus, err := connectRabbitMQ()
@@ -80,26 +98,23 @@ func runPeriodicCleanup(db *sqlx.DB) {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			log.Println("Ejecutando limpieza periódica de datos...")
-			
-			// Crear contexto con timeout
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			
-			// Limpiar tokens de verificación expirados
-			if err := cleanupExpiredVerificationTokens(ctx, db); err != nil {
-				log.Printf("Error al limpiar tokens de verificación expirados: %v", err)
-			}
-			
-			// Limpiar sesiones expiradas
-			if err := cleanupExpiredSessions(ctx, db); err != nil {
-				log.Printf("Error al limpiar sesiones expiradas: %v", err)
-			}
-			
-			cancel()
+	for range ticker.C {
+		log.Println("Ejecutando limpieza periódica de datos...")
+
+		// Crear contexto con timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+
+		// Limpiar tokens de verificación expirados
+		if err := cleanupExpiredVerificationTokens(ctx, db); err != nil {
+			log.Printf("Error al limpiar tokens de verificación expirados: %v", err)
 		}
+
+		// Limpiar sesiones expiradas
+		if err := cleanupExpiredSessions(ctx, db); err != nil {
+			log.Printf("Error al limpiar sesiones expiradas: %v", err)
+		}
+
+		cancel()
 	}
 }
 

@@ -10,9 +10,11 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"github.com/spf13/viper"
 
 	"auth-microservice/pkg/api/http/handlers"
+	"auth-microservice/pkg/application/ports"
 	"auth-microservice/pkg/application/services"
 	"auth-microservice/pkg/infrastructure/persistence/postgres"
 )
@@ -23,11 +25,11 @@ func LoadConfig() error {
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
 	viper.AddConfigPath("./config")
-	
+
 	// Para leer variables de entorno
 	viper.AutomaticEnv()
-	viper.SetEnvPrefix("")                          
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_")) 
+	viper.SetEnvPrefix("")
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	// Valores por defecto
 	viper.SetDefault("server.port", "3003")
@@ -89,7 +91,7 @@ func ConnectDB() (*sqlx.DB, error) {
 }
 
 // InitializeServices inicializa todos los servicios necesarios
-func InitializeServices(db *sqlx.DB) services.AuthService {
+func InitializeServices(db *sqlx.DB, emailSender ports.EmailSender) services.AuthService {
 	// Inicializar repositorios
 	userRepo := postgres.NewUserRepository(db)
 	roleRepo := postgres.NewRoleRepository(db)
@@ -101,7 +103,7 @@ func InitializeServices(db *sqlx.DB) services.AuthService {
 	// Inicializar servicios
 	jwtSecret := viper.GetString("auth.jwt_secret")
 	tokenExpiration := viper.GetDuration("auth.token_expiration")
-	
+
 	authService := services.NewAuthService(
 		userRepo,
 		roleRepo,
@@ -111,8 +113,9 @@ func InitializeServices(db *sqlx.DB) services.AuthService {
 		sessionRepo,
 		jwtSecret,
 		tokenExpiration,
+		emailSender,
 	)
-	
+
 	return authService
 }
 
@@ -121,10 +124,19 @@ func SetupRouter(authService services.AuthService) *mux.Router {
 	// Inicializar router
 	router := mux.NewRouter()
 	router.Use(loggingMiddleware)
-	
+
+	// Servir archivos estáticos primero
+	router.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
+
+	// Ruta específica para email-verified.html en la raíz
+	router.HandleFunc("/email-verified.html", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		http.ServeFile(w, r, "static/email-verified.html")
+	}).Methods("GET")
+
 	// Inicializar handlers
 	authHandler := handlers.NewAuthHandler(authService)
-	
+
 	// Definir rutas
 	apiRouter := router.PathPrefix("/api").Subrouter()
 	authRouter := apiRouter.PathPrefix("/auth").Subrouter()
@@ -135,7 +147,7 @@ func SetupRouter(authService services.AuthService) *mux.Router {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	}).Methods("GET")
-	
+
 	return router
 }
 

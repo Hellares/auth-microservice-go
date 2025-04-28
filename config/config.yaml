@@ -1,0 +1,46 @@
+# Configuración de Base de Datos
+database:
+  host: "161.132.50.183"
+  port: "5432"
+  user: "postgres"
+  password: "jtorres159."
+  name: "auth"
+  max_open_conns: 25
+  max_idle_conns: 25
+  conn_max_lifetime: "15m"
+
+auth:
+  jwt_secret: "tu_secreto_jwt_super_seguro"
+  token_expiration: "24h"
+
+server:
+  port: "3007"
+  read_timeout: "15s"
+  write_timeout: "15s"
+  idle_timeout: "60s"
+  env: development
+
+smtp:
+  host: "smtp.gmail.com"
+  port: 587
+  username: "hellares98@gmail.com"
+  password: "yexk ovay swck hevz"
+  from: "Sistema de Autenticación <hellares98@gmail.com>"
+
+# Para producción, cambiar todas las URLs de localhost por tu dominio
+# Ejemplo: https://tudominio.com/api/auth/reset-password
+urls:
+  reset_password: "http://localhost:3007/api/auth/reset-password"
+  verify_email: "http://localhost:3007/api/auth/verify-email"
+
+site:
+  name: "Sistema de Autenticación"
+  # Para producción, cambiar por tu dominio
+  # Ejemplo: https://tudominio.com
+  url: "http://localhost:3007"
+  support_email: "hellares98@gmail.com"
+
+rabbitmq:
+  url: "amqp://jtorres:jtorres159.@161.132.50.183:5672"
+  exchange: "microservices"
+  queue: "auth_queue" 
