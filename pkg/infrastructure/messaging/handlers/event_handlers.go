@@ -39,55 +39,97 @@ type EmpresaCreatedEvent struct {
 	CreadorTelefono string `json:"creadorTelefono"`
 }
 
-// CreateEmpresaAdmin maneja el evento de creación de empresa
+
 func (h *EventHandler) HandleEmpresaCreated(payload []byte) error {
-	var event EmpresaCreatedEvent
-	if err := json.Unmarshal(payload, &event); err != nil {
-		return err
-	}
+    log.Printf("Recibido evento empresa.created: %s", string(payload))
 
-	// Validar datos
-	if event.ID == "" || event.CreadorID == "" || event.CreadorEmail == "" || event.CreadorDNI == "" {
-		return errors.New("datos insuficientes en el evento")
-	}
+    // Estructura para manejar el formato de mensaje de NestJS
+    type NestEventWrapper struct {
+        Pattern string          `json:"pattern"`
+        Data    json.RawMessage `json:"data"`
+    }
 
-	// Convertir IDs a UUID
-	empresaID, err := uuid.Parse(event.ID)
-	if err != nil {
-		return err
-	}
+    // Primero intentar deserializar como wrapper de NestJS
+    var nestWrapper NestEventWrapper
+    if err := json.Unmarshal(payload, &nestWrapper); err != nil {
+        log.Printf("Error al deserializar mensaje como wrapper Nest: %v", err)
+        
+        // Si falla, intentar deserializar directamente
+        var event EmpresaCreatedEvent
+        if err := json.Unmarshal(payload, &event); err != nil {
+            log.Printf("Error al deserializar mensaje como evento directo: %v", err)
+            return errors.New("datos insuficientes en el evento")
+        }
+        
+        // Si se puede deserializar directamente, verificar campos críticos
+        if event.ID == "" || event.CreadorID == "" {
+            log.Printf("Evento sin wrapper tiene datos insuficientes")
+            return errors.New("datos insuficientes en el evento")
+        }
+        
+        // Procesar el evento deserializado directamente
+        return h.processEmpresaCreatedEvent(event)
+    }
+    
+    // Si es un wrapper de NestJS, deserializar la parte de datos
+    var event EmpresaCreatedEvent
+    if err := json.Unmarshal(nestWrapper.Data, &event); err != nil {
+        log.Printf("Error al deserializar datos dentro del wrapper: %v", err)
+        return errors.New("datos insuficientes en el evento")
+    }
+    
+    // Verificar que los campos críticos estén presentes
+    if event.ID == "" || event.CreadorID == "" {
+        log.Printf("Evento con wrapper tiene datos insuficientes")
+        return errors.New("datos insuficientes en el evento")
+    }
+    
+    log.Printf("Evento deserializado: ID=%s, CreadorID=%s, CreadorDNI=%s, CreadorEmail=%s",
+        event.ID, event.CreadorID, event.CreadorDNI, event.CreadorEmail)
+    
+    // Procesar el evento
+    return h.processEmpresaCreatedEvent(event)
+}
 
-	creadorID, err := uuid.Parse(event.CreadorID)
-	if err != nil {
-		// Si el creador no existe en el sistema de autenticación, lo creamos
-		log.Printf("Creador de empresa no encontrado, creando usuario: %s", event.CreadorEmail)
+// Método para procesar el evento una vez deserializado correctamente
+func (h *EventHandler) processEmpresaCreatedEvent(event EmpresaCreatedEvent) error {
+    // Convertir IDs a UUID
+    empresaID, err := uuid.Parse(event.ID)
+    if err != nil {
+        return err
+    }
 
-		// Generar una contraseña temporal
-		tempPassword := generateRandomPassword()
+    creadorID, err := uuid.Parse(event.CreadorID)
+    if err != nil {
+        // Si el creador no existe en el sistema de autenticación, lo creamos
+        log.Printf("Creador de empresa no encontrado, creando usuario: %s", event.CreadorEmail)
 
-		// Registrar al usuario
-		user, err := h.authService.Register(
-			context.Background(),
-			event.CreadorDNI,
-			event.CreadorEmail,
-			tempPassword,
-			event.CreadorNombre,
-			event.CreadorApellido,
-			event.CreadorTelefono,
-		)
+        // Generar una contraseña temporal
+        tempPassword := generateRandomPassword()
 
-		if err != nil {
-			return err
-		}
+        // Registrar al usuario
+        user, err := h.authService.Register(
+            context.Background(),
+            event.CreadorDNI,
+            event.CreadorEmail,
+            tempPassword,
+            event.CreadorNombre,
+            event.CreadorApellido,
+            event.CreadorTelefono,
+        )
 
-		creadorID = user.ID
+        if err != nil {
+            return err
+        }
 
-		// Enviar email con contraseña temporal (implementación pendiente)
-		log.Printf("Usuario creado con ID: %s, se debe enviar email con password temporal", user.ID)
-	}
+        creadorID = user.ID
 
-	// Asignar rol de administrador de empresa
-	return h.authService.CreateEmpresaAdmin(context.Background(), &entities.User{ID: creadorID}, empresaID)
+        // Enviar email con contraseña temporal (implementación pendiente)
+        log.Printf("Usuario creado con ID: %s, se debe enviar email con password temporal", user.ID)
+    }
+
+    // Asignar rol de administrador de empresa
+    return h.authService.CreateEmpresaAdmin(context.Background(), &entities.User{ID: creadorID}, empresaID)
 }
 
 // UsuarioCreatedEvent representa un evento de creación de usuario en una empresa

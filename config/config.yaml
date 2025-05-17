@@ -1,6 +1,16 @@
 # Configuración de Base de Datos
+# database:
+#   host: "161.132.50.183"
+#   port: "5432"
+#   user: "postgres"
+#   password: "jtorres159."
+#   name: "auth"
+#   max_open_conns: 25
+#   max_idle_conns: 25
+#   conn_max_lifetime: "15m"
+
 database:
-  host: "161.132.50.183"
+  host: "172.20.0.4"
   port: "5432"
   user: "postgres"
   password: "jtorres159."
@@ -10,7 +20,7 @@ database:
   conn_max_lifetime: "15m"
 
 auth:
-  jwt_secret: "tu_secreto_jwt_super_seguro"
+  jwt_secret: "tu-secreto-jwt-suficientemente-largo-y-seguro"
   token_expiration: "24h"
 
 server:
@@ -25,22 +35,22 @@ smtp:
   port: 587
   username: "hellares98@gmail.com"
   password: "yexk ovay swck hevz"
-  from: "Sistema de Autenticación <hellares98@gmail.com>"
+  from: "Autenticación <hellares98@gmail.com>"
 
 # Para producción, cambiar todas las URLs de localhost por tu dominio
 # Ejemplo: https://tudominio.com/api/auth/reset-password
 urls:
-  reset_password: "http://localhost:3007/api/auth/reset-password"
-  verify_email: "http://localhost:3007/api/auth/verify-email"
+  reset_password: "http://0.0.0.0:3007/api/auth/reset-password"
+  verify_email: "http://0.0.0.0:3007/api/auth/verify-email"
 
 site:
   name: "Sistema de Autenticación"
   # Para producción, cambiar por tu dominio
   # Ejemplo: https://tudominio.com
-  url: "http://localhost:3007"
+  url: "http://0.0.0.0:3007"
   support_email: "hellares98@gmail.com"
 
 rabbitmq:
-  url: "amqp://jtorres:jtorres159.@161.132.50.183:5672"
+  url: "amqp://jtorres:jtorres159.@172.20.0.2:5672"
   exchange: "microservices"
   queue: "auth_queue" 

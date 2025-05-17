@@ -17,4 +17,9 @@ type UserEmpresaRoleRepository interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	AssignRoleToUser(ctx context.Context, userID, empresaID, roleID uuid.UUID) error
 	RemoveRoleFromUser(ctx context.Context, userID, empresaID, roleID uuid.UUID) error
+
+	FindEmpresasByUserID(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error)
+	GetUsersByEmpresa(ctx context.Context, empresaID uuid.UUID, roleFilter string) ([]uuid.UUID, error)
+	FindByUserID(ctx context.Context, userID uuid.UUID) ([]*entities.UserEmpresaRole, error)
+	GetAllUsersByEmpresa(ctx context.Context, empresaID uuid.UUID, roleFilter string) ([]uuid.UUID, error)
 }

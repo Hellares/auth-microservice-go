@@ -189,3 +189,41 @@ func (r *roleRepository) FindByUserAndEmpresa(ctx context.Context, userID, empre
 
 	return roles, nil
 }
+
+func (r *roleRepository) FindAllByUserID(ctx context.Context, userID uuid.UUID) ([]*entities.Role, error) {
+    query := `
+        SELECT DISTINCT r.id, r.name, r.description, r.created_at, r.updated_at
+        FROM roles r
+        JOIN user_empresa_roles uer ON r.id = uer.role_id
+        WHERE uer.user_id = $1 AND uer.active = true
+        ORDER BY r.name
+    `
+    
+    rows, err := r.db.QueryContext(ctx, query, userID)
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()
+    
+    var roles []*entities.Role
+    for rows.Next() {
+        var role entities.Role
+        err := rows.Scan(
+            &role.ID,
+            &role.Name,
+            &role.Description,
+            &role.CreatedAt,
+            &role.UpdatedAt,
+        )
+        if err != nil {
+            return nil, err
+        }
+        roles = append(roles, &role)
+    }
+    
+    if err = rows.Err(); err != nil {
+        return nil, err
+    }
+    
+    return roles, nil
+}

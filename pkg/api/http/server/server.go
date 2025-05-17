@@ -99,6 +99,8 @@ func InitializeServices(db *sqlx.DB, emailSender ports.EmailSender) services.Aut
 	userEmpresaRoleRepo := postgres.NewUserEmpresaRoleRepository(db)
 	verificationTokenRepo := postgres.NewVerificationTokenRepository(db)
 	sessionRepo := postgres.NewSessionRepository(db)
+	systemRoleRepo := postgres.NewSystemRoleRepository(db)
+	
 
 	// Inicializar servicios
 	jwtSecret := viper.GetString("auth.jwt_secret")
@@ -111,9 +113,12 @@ func InitializeServices(db *sqlx.DB, emailSender ports.EmailSender) services.Aut
 		userEmpresaRoleRepo,
 		verificationTokenRepo,
 		sessionRepo,
+		systemRoleRepo,
 		jwtSecret,
 		tokenExpiration,
 		emailSender,
+
+
 	)
 
 	return authService
@@ -141,6 +146,15 @@ func SetupRouter(authService services.AuthService) *mux.Router {
 	apiRouter := router.PathPrefix("/api").Subrouter()
 	authRouter := apiRouter.PathPrefix("/auth").Subrouter()
 	authHandler.RegisterRoutes(authRouter)
+
+	// Imprimir todas las rutas registradas (para debugging)
+    router.Walk(func(route *mux.Route, router *mux.Router, ancestors []*mux.Route) error {
+        pathTemplate, err := route.GetPathTemplate()
+        if err == nil {
+            log.Printf("Ruta registrada: %s", pathTemplate)
+        }
+        return nil
+    })
 
 	// Health check
 	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

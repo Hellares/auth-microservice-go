@@ -15,4 +15,5 @@ type RoleRepository interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	List(ctx context.Context) ([]*entities.Role, error)
 	FindByUserAndEmpresa(ctx context.Context, userID, empresaID uuid.UUID) ([]*entities.Role, error)
+	FindAllByUserID(ctx context.Context, userID uuid.UUID) ([]*entities.Role, error)
 }

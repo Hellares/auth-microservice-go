@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
@@ -35,6 +36,19 @@ type AuthService interface {
 	GetUserByDNI(ctx context.Context, dni string) (*entities.User, error)
 	GetUserByEmail(ctx context.Context, email string) (*entities.User, error)
 	GetRoleByName(ctx context.Context, name string) (*entities.Role, error)
+
+	GetUserEmpresas(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error)
+
+	FindUserByIdentifier(ctx context.Context, identifier string) (*entities.User, error)
+	AddClientToEmpresa(ctx context.Context, userID, empresaID uuid.UUID) error
+	GetPermissionsByRole(ctx context.Context, roleID uuid.UUID) ([]*entities.Permission, error)
+	HasSystemRole(ctx context.Context, userID uuid.UUID, roleName string) (bool, error)
+	GetUsersByEmpresa(ctx context.Context, empresaID uuid.UUID, page, limit int, roleFilter string) ([]*UserWithRoles, int, error)
+	// GetAllUserRoles(ctx context.Context, userID uuid.UUID) ([]*entities.Role, error)
+	ListAllUsers(ctx context.Context, page, limit int, filters map[string]string) ([]*UserInfo, int, error)
+	ListUsersInEmpresa(ctx context.Context, empresaID uuid.UUID, page, limit int, filters map[string]string) ([]*UserInfo, int, error)
+
+	
 }
 
 // authServiceImpl implementa la interfaz AuthService
@@ -45,9 +59,52 @@ type authServiceImpl struct {
 	userEmpresaRoleRepo   repositories.UserEmpresaRoleRepository
 	verificationTokenRepo repositories.VerificationTokenRepository
 	sessionRepo           repositories.SessionRepository
+	systemRoleRepo 		  repositories.SystemRoleRepository
 	jwtService            *auth.JWTService // Reemplaza jwtSecret
 	tokenExpiration       time.Duration
 	emailSender           ports.EmailSender
+}
+
+// Estructura simplificada para roles
+type RoleSimple struct {
+    ID          uuid.UUID `json:"id"`
+    Name        string    `json:"name"`
+    Description string    `json:"description,omitempty"`
+}
+
+type UserWithRoles struct {
+    ID        uuid.UUID    `json:"id"`
+    DNI       string       `json:"dni"`
+    Email     string       `json:"email"`
+    FirstName string       `json:"firstName"`
+    LastName  string       `json:"lastName"`
+    Phone     string       `json:"phone,omitempty"`
+    Status    entities.UserStatus `json:"status"`
+    Verified  bool         `json:"verified"`
+    CreatedAt time.Time    `json:"createdAt"`
+    UpdatedAt time.Time    `json:"updatedAt"`
+    //Roles     []*entities.Role `json:"roles"`
+	Roles     []RoleSimple        `json:"roles"`
+}
+
+type UserInfo struct {
+    ID        uuid.UUID            `json:"id"`
+    DNI       string               `json:"dni"`
+    Email     string               `json:"email"`
+    FirstName string               `json:"firstName"`
+    LastName  string               `json:"lastName"`
+    Phone     string               `json:"phone,omitempty"`
+    Status    entities.UserStatus  `json:"status"`
+    Verified  bool                 `json:"verified"`
+    CreatedAt time.Time            `json:"createdAt"`
+    UpdatedAt time.Time            `json:"updatedAt"`
+    Empresas  []EmpresaInfo        `json:"empresas,omitempty"`
+	Roles     []RoleSimple         `json:"roles,omitempty"` 
+}
+
+type EmpresaInfo struct {
+    ID   uuid.UUID `json:"id"`
+    Role string    `json:"role"`
 }
 
 // NewAuthService crea una nueva instancia del servicio de autenticación
@@ -58,9 +115,11 @@ func NewAuthService(
 	userEmpresaRoleRepo repositories.UserEmpresaRoleRepository,
 	verificationTokenRepo repositories.VerificationTokenRepository,
 	sessionRepo repositories.SessionRepository,
+	systemRoleRepo repositories.SystemRoleRepository,
 	jwtSecret string,
 	tokenExpiration time.Duration,
 	emailSender ports.EmailSender,
+	
 ) AuthService {
 	jwtService := auth.NewJWTService(jwtSecret, tokenExpiration)
 
@@ -71,9 +130,12 @@ func NewAuthService(
 		userEmpresaRoleRepo:   userEmpresaRoleRepo,
 		verificationTokenRepo: verificationTokenRepo,
 		sessionRepo:           sessionRepo,
+		systemRoleRepo: 	   systemRoleRepo,
 		jwtService:            jwtService,
 		tokenExpiration:       tokenExpiration,
 		emailSender:           emailSender,
+		
+
 	}
 }
 
@@ -419,26 +481,53 @@ func (s *authServiceImpl) GetUserRoles(ctx context.Context, userID, empresaID uu
 
 // HasPermission verifica si un usuario tiene un permiso específico en una empresa
 func (s *authServiceImpl) HasPermission(ctx context.Context, userID, empresaID uuid.UUID, permissionName string) (bool, error) {
+	// Primero, verificar si es un rol de sistema
+    if permissionName == "SUPER_ADMIN" || permissionName == "SYSTEM_ADMIN" {
+        return s.HasSystemRole(ctx, userID, permissionName)
+    }
+	// Para permisos de empresa, continuar con la lógica existente
+    if empresaID == uuid.Nil {
+        // Si no hay empresa especificada y no es un rol de sistema, no tiene permiso
+        return false, nil
+    }
+
+	// Log para debugging
+	log.Printf("Verificando permiso %s para usuario %s en empresa %s", permissionName, userID, empresaID)
 	// Obtener los roles del usuario en la empresa
 	roles, err := s.GetUserRoles(ctx, userID, empresaID)
 	if err != nil {
+		log.Printf("Error obteniendo roles: %v", err)
 		return false, err
 	}
 
+	log.Printf("Usuario tiene %d roles en la empresa", len(roles))
 	// Para cada rol, verificar si tiene el permiso
 	for _, role := range roles {
-		permissions, err := s.permissionRepo.FindByRole(ctx, role.ID)
-		if err != nil {
-			continue
-		}
+		log.Printf("Verificando rol: %s", role.Name)
+
+		// Si estamos buscando un permiso que es igual al nombre del rol
+        if role.Name == permissionName {
+            log.Printf("Usuario tiene el rol %s", permissionName)
+            return true, nil
+        }
+		
+		
+		// Obtener permisos del rol
+        permissions, err := s.permissionRepo.FindByRole(ctx, role.ID)
+        if err != nil {
+            log.Printf("Error obteniendo permisos del rol %s: %v", role.Name, err)
+            continue
+        }
 
 		for _, permission := range permissions {
 			if permission.Name == permissionName {
+				log.Printf("Usuario tiene el permiso %s a través del rol %s", permissionName, role.Name)
 				return true, nil
 			}
 		}
 	}
 
+	log.Printf("Usuario no tiene el permiso %s", permissionName)
 	return false, nil
 }
 
@@ -455,4 +544,308 @@ func (s *authServiceImpl) GetUserByEmail(ctx context.Context, email string) (*en
 // GetRoleByName obtiene un rol por su nombre
 func (s *authServiceImpl) GetRoleByName(ctx context.Context, name string) (*entities.Role, error) {
 	return s.roleRepo.FindByName(ctx, name)
+}
+
+
+// GetUserEmpresas obtiene las empresas asociadas a un usuario
+// y devuelve una lista de IDs de empresas
+func (s *authServiceImpl) GetUserEmpresas(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	
+	// Verificar que el usuario existe
+	_, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return nil, errors.New("usuario no encontrado")
+	}
+
+	// Obtener las empresas asociadas al usuario
+	return s.userEmpresaRoleRepo.FindEmpresasByUserID(ctx, userID)
+}
+
+
+func (s *authServiceImpl) FindUserByIdentifier(ctx context.Context, identifier string) (*entities.User, error) {
+    //! Buscar por identificador único (DNI, email o teléfono)
+    return s.userRepo.FindByIdentifier(ctx, identifier)
+}
+
+func (s *authServiceImpl) AddClientToEmpresa(ctx context.Context, userID, empresaID uuid.UUID) error {
+    // Buscar rol de cliente
+    clienteRole, err := s.roleRepo.FindByName(ctx, "CLIENTE")
+    if err != nil {
+        return errors.New("rol de cliente no encontrado")
+    }
+
+    // Verificar si ya existe esta relación
+    existingRoles, err := s.userEmpresaRoleRepo.FindByUserAndEmpresa(ctx, userID, empresaID)
+    if err == nil && len(existingRoles) > 0 {
+        for _, existing := range existingRoles {
+            if existing.RoleID == clienteRole.ID {
+                // Si ya existe pero está inactivo, activarlo
+                if !existing.Active {
+                    existing.Active = true
+                    existing.UpdatedAt = time.Now()
+                    return s.userEmpresaRoleRepo.Update(ctx, existing)
+                }
+                return errors.New("el usuario ya es cliente de esta empresa")
+            }
+        }
+    }
+
+    // Crear nueva relación
+    userEmpresaRole := &entities.UserEmpresaRole{
+        ID:        uuid.New(),
+        UserID:    userID,
+        EmpresaID: empresaID,
+        RoleID:    clienteRole.ID,
+        Active:    true,
+        CreatedAt: time.Now(),
+        UpdatedAt: time.Now(),
+    }
+
+    return s.userEmpresaRoleRepo.Create(ctx, userEmpresaRole)
+}
+
+func (s *authServiceImpl) GetPermissionsByRole(ctx context.Context, roleID uuid.UUID) ([]*entities.Permission, error) {
+    return s.permissionRepo.FindByRole(ctx, roleID)
+}
+
+func (s *authServiceImpl) HasSystemRole(ctx context.Context, userID uuid.UUID, roleName string) (bool, error) {
+    return s.systemRoleRepo.HasSystemRole(ctx, userID, roleName)
+}
+
+
+
+func (s *authServiceImpl) GetUsersByEmpresa(ctx context.Context, empresaID uuid.UUID, page, limit int, roleFilter string) ([]*UserWithRoles, int, error) {
+    // Primero, obtenemos los IDs de usuarios que pertenecen a esta empresa
+    userIDs, err := s.userEmpresaRoleRepo.GetUsersByEmpresa(ctx, empresaID, roleFilter)
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    if len(userIDs) == 0 {
+        return []*UserWithRoles{}, 0, nil
+    }
+    
+    // Obtenemos la información completa de los usuarios
+    users, total, err := s.userRepo.FindByIDs(ctx, userIDs, page, limit)
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    // Convertir a UserWithRoles e incluir los roles
+	usersWithRoles := make([]*UserWithRoles, len(users))
+    for i, user := range users {
+        roles, err := s.GetUserRoles(ctx, user.ID, empresaID)
+        if err != nil {
+            log.Printf("Error obteniendo roles para usuario %s: %v", user.ID, err)
+            roles = []*entities.Role{}
+        }
+
+		// Convertir roles a RoleSimple
+        simpleRoles := make([]RoleSimple, len(roles))
+        for j, role := range roles {
+            simpleRoles[j] = RoleSimple{
+                ID:          role.ID,
+                Name:        role.Name,
+                Description: role.Description,
+            }
+        }
+        
+        usersWithRoles[i] = &UserWithRoles{
+            ID:        user.ID,
+            DNI:       user.DNI,
+            Email:     user.Email,
+            FirstName: user.FirstName,
+            LastName:  user.LastName,
+            Phone:     user.Phone,
+            Status:    user.Status,
+            Verified:  user.Verified,
+            CreatedAt: user.CreatedAt,
+            UpdatedAt: user.UpdatedAt,
+            Roles:     simpleRoles,
+        }
+    }
+    
+    return usersWithRoles, total, nil
+}
+
+// func (s *authServiceImpl) GetAllUserRoles(ctx context.Context, userID uuid.UUID) ([]*entities.Role, error) {
+//     var allRoles []*entities.Role
+    
+//     // 1. Obtener roles del sistema
+//     systemRoles, err := s.systemRoleRepo.FindByUserID(ctx, userID)
+//     if err != nil {
+//         log.Printf("Error obteniendo roles del sistema: %v", err)
+//     } else {
+//         // Convertir system roles a entities.Role
+//         for _, sysRole := range systemRoles {
+//             if sysRole.Active {
+//                 // Buscar el rol correspondiente en la tabla roles
+//                 role, err := s.roleRepo.FindByName(ctx, sysRole.RoleName)
+//                 if err == nil && role != nil {
+//                     allRoles = append(allRoles, role)
+//                 } else {
+//                     // Si no existe en la tabla roles, crear uno temporal
+//                     allRoles = append(allRoles, &entities.Role{
+//                         ID:          uuid.New(),
+//                         Name:        sysRole.RoleName,
+//                         Description: "Rol del sistema",
+//                         CreatedAt:   time.Now(),
+//                         UpdatedAt:   time.Now(),
+//                     })
+//                 }
+//             }
+//         }
+//     }
+    
+//     // 2. Obtener roles de empresa usando el repositorio
+//     empresaRoles, err := s.roleRepo.FindAllByUserID(ctx, userID)
+//     if err != nil {
+//         log.Printf("Error obteniendo roles de empresa: %v", err)
+//     } else {
+//         allRoles = append(allRoles, empresaRoles...)
+//     }
+    
+//     return allRoles, nil
+// }
+
+func (s *authServiceImpl) ListAllUsers(ctx context.Context, page, limit int, filters map[string]string) ([]*UserInfo, int, error) {
+    // Obtener usuarios con paginación y filtros
+    users, total, err := s.userRepo.ListWithFilters(ctx, page, limit, filters)
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    userInfos := make([]*UserInfo, len(users))
+    
+    for i, user := range users {
+        // Para cada usuario, obtener sus empresas y roles
+        empresaRoles, err := s.userEmpresaRoleRepo.FindByUserID(ctx, user.ID)
+        if err != nil {
+            log.Printf("Error obteniendo empresas para usuario %s: %v", user.ID, err)
+            empresaRoles = []*entities.UserEmpresaRole{}
+        }
+        
+        // Mapa para agrupar por empresa (para evitar duplicados)
+        empresasMap := make(map[uuid.UUID]string)
+        
+        for _, er := range empresaRoles {
+            // Obtener nombre del rol
+            role, err := s.roleRepo.FindByID(ctx, er.RoleID)
+            if err != nil {
+                log.Printf("Error obteniendo rol %s: %v", er.RoleID, err)
+                continue
+            }
+            
+            // Si ya existe esta empresa, verificar si el rol actual tiene mayor prioridad
+            if existingRole, found := empresasMap[er.EmpresaID]; found {
+                if isPriorityRole(role.Name) && !isPriorityRole(existingRole) {
+                    empresasMap[er.EmpresaID] = role.Name
+                }
+            } else {
+                empresasMap[er.EmpresaID] = role.Name
+            }
+        }
+        
+        // Convertir mapa a slice
+        empresas := make([]EmpresaInfo, 0, len(empresasMap))
+        for empresaID, roleName := range empresasMap {
+            empresas = append(empresas, EmpresaInfo{
+                ID:   empresaID,
+                Role: roleName,
+            })
+        }
+        
+        // Crear UserInfo
+        userInfos[i] = &UserInfo{
+            ID:        user.ID,
+            DNI:       user.DNI,
+            Email:     user.Email,
+            FirstName: user.FirstName,
+            LastName:  user.LastName,
+            Phone:     user.Phone,
+            Status:    user.Status,
+            Verified:  user.Verified,
+            CreatedAt: user.CreatedAt,
+            UpdatedAt: user.UpdatedAt,
+            Empresas:  empresas,
+        }
+    }
+    
+    return userInfos, total, nil
+}
+
+//! Función auxiliar para determinar si un rol tiene prioridad
+func isPriorityRole(roleName string) bool {
+    priorityRoles := []string{"EMPRESA_ADMIN", "ADMIN_USERS", "ADMIN"}
+    for _, role := range priorityRoles {
+        if roleName == role {
+            return true
+        }
+    }
+    return false
+}
+
+func (s *authServiceImpl) ListUsersInEmpresa(ctx context.Context, empresaID uuid.UUID, page, limit int, filters map[string]string) ([]*UserInfo, int, error) {
+    // Obtener todos los IDs de usuarios de esta empresa
+    userIDs, err := s.userEmpresaRoleRepo.GetAllUsersByEmpresa(ctx, empresaID, filters["role"])
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    if len(userIDs) == 0 {
+        return []*UserInfo{}, 0, nil
+    }
+    
+    // Crear un nuevo mapa de filtros que incluya los IDs
+    userFilters := make(map[string]interface{})
+    for k, v := range filters {
+        if k != "role" { // El filtro de rol ya se aplicó al obtener los userIDs
+            userFilters[k] = v
+        }
+    }
+    userFilters["ids"] = userIDs
+    
+    // Obtener usuarios con paginación y filtros
+    users, total, err := s.userRepo.ListWithAdvancedFilters(ctx, page, limit, userFilters)
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    userInfos := make([]*UserInfo, len(users))
+    
+    for i, user := range users {
+        // Para cada usuario, obtener sus roles en esta empresa
+        roles, err := s.GetUserRoles(ctx, user.ID, empresaID)
+        if err != nil {
+            log.Printf("Error obteniendo roles para usuario %s: %v", user.ID, err)
+            roles = []*entities.Role{}
+        }
+        
+        // Convertir roles a formato simple
+        roleInfos := make([]RoleSimple, len(roles))
+        for j, role := range roles {
+            roleInfos[j] = RoleSimple{
+                ID:          role.ID,
+                Name:        role.Name,
+                Description: role.Description,
+            }
+        }
+        
+        // Crear UserInfo (sin incluir todas las empresas para esta vista)
+        userInfos[i] = &UserInfo{
+            ID:        user.ID,
+            DNI:       user.DNI,
+            Email:     user.Email,
+            FirstName: user.FirstName,
+            LastName:  user.LastName,
+            Phone:     user.Phone,
+            Status:    user.Status,
+            Verified:  user.Verified,
+            CreatedAt: user.CreatedAt,
+            UpdatedAt: user.UpdatedAt,
+            Roles:     roleInfos,
+        }
+    }
+    
+    return userInfos, total, nil
 }

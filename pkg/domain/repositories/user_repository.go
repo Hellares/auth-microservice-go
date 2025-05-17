@@ -21,4 +21,9 @@ type UserRepository interface {
 	VerifyEmail(ctx context.Context, id uuid.UUID) error
 	UpdateStatus(ctx context.Context, id uuid.UUID, status entities.UserStatus) error
 	UpdateLastLogin(ctx context.Context, id uuid.UUID) error
+
+	FindByIdentifier(ctx context.Context, identifier string) (*entities.User, error)
+	FindByIDs(ctx context.Context, ids []uuid.UUID, page, limit int) ([]*entities.User, int, error)
+	ListWithFilters(ctx context.Context, page, limit int, filters map[string]string) ([]*entities.User, int, error)
+	ListWithAdvancedFilters(ctx context.Context, page, limit int, filters map[string]interface{}) ([]*entities.User, int, error)
 }

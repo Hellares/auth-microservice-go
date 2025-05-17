@@ -13,7 +13,6 @@ type TokenClaims struct {
 	UserID    string `json:"userId"`
 	DNI       string `json:"dni"`
 	Email     string `json:"email"`
-	ExpiresAt int64  `json:"exp"`
 	jwt.RegisteredClaims
 }
 
@@ -75,22 +74,30 @@ func (s *JWTService) ValidateToken(tokenString string) (*TokenClaims, error) {
 
 // RefreshToken genera un nuevo token a partir de uno existente
 func (s *JWTService) RefreshToken(tokenString string) (string, error) {
-	claims, err := s.ValidateToken(tokenString)
-	if err != nil {
-		return "", err
-	}
+    claims, err := s.ValidateToken(tokenString)
+    if err != nil {
+        return "", err
+    }
 
-	// Comprobar si el token está próximo a expirar
-	expirationTime := time.Unix(claims.ExpiresAt, 0)
-	now := time.Now()
+    // Comprobar si el token está próximo a expirar
+    // Corregir aquí para usar el valor dentro de NumericDate
+    var expirationTime time.Time
+    if claims.RegisteredClaims.ExpiresAt != nil {
+        expirationTime = claims.RegisteredClaims.ExpiresAt.Time
+    } else {
+        // Si no hay ExpiresAt, usar el tiempo actual (esto significará que el token está expirado)
+        expirationTime = time.Now()
+    }
+    
+    now := time.Now()
 
-	// Si el token expira en menos de 12 horas, generamos uno nuevo
-	if expirationTime.Sub(now) < 12*time.Hour {
-		return s.GenerateToken(claims)
-	}
+    // Si el token expira en menos de 12 horas, generamos uno nuevo
+    if expirationTime.Sub(now) < 12*time.Hour {
+        return s.GenerateToken(claims)
+    }
 
-	// Si no está próximo a expirar, devolvemos el mismo token
-	return tokenString, nil
+    // Si no está próximo a expirar, devolvemos el mismo token
+    return tokenString, nil
 }
 
 // GetUserIDFromToken extrae el ID de usuario de un token

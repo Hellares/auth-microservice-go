@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 
 	"auth-microservice/pkg/domain/entities"
 )
@@ -370,4 +372,309 @@ func (r *userRepository) UpdateLastLogin(ctx context.Context, id uuid.UUID) erro
 
 	_, err := r.db.ExecContext(ctx, query, time.Now(), time.Now(), id)
 	return err
+}
+
+func (r *userRepository) FindByIdentifier(ctx context.Context, identifier string) (*entities.User, error) {
+    query := `
+        SELECT 
+            id, dni, email, password, first_name, last_name, phone, avatar_url, 
+            status, verified, last_login, created_at, updated_at
+        FROM users
+        WHERE dni = $1 OR email = $1 OR phone = $1
+        LIMIT 1
+    `
+
+    var user entities.User
+    var lastLogin sql.NullTime
+
+    err := r.db.QueryRowContext(ctx, query, identifier).Scan(
+        &user.ID,
+        &user.DNI,
+        &user.Email,
+        &user.Password,
+        &user.FirstName,
+        &user.LastName,
+        &user.Phone,
+        &user.AvatarURL,
+        &user.Status,
+        &user.Verified,
+        &lastLogin,
+        &user.CreatedAt,
+        &user.UpdatedAt,
+    )
+
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return nil, errors.New("usuario no encontrado")
+        }
+        return nil, err
+    }
+
+    if lastLogin.Valid {
+        user.LastLogin = &lastLogin.Time
+    }
+
+    return &user, nil
+}
+
+
+func (r *userRepository) FindByIDs(ctx context.Context, ids []uuid.UUID, page, limit int) ([]*entities.User, int, error) {
+    if len(ids) == 0 {
+        return []*entities.User{}, 0, nil
+    }
+    
+    // Contar total
+    countQuery := `
+        SELECT COUNT(*) 
+        FROM users 
+        WHERE id = ANY($1)
+    `
+    var total int
+    err := r.db.QueryRowContext(ctx, countQuery, pq.Array(ids)).Scan(&total)
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    // Obtener usuarios paginados
+    offset := (page - 1) * limit
+    query := `
+        SELECT 
+            id, dni, email, first_name, last_name, phone, avatar_url, 
+            status, verified, last_login, created_at, updated_at
+        FROM users
+        WHERE id = ANY($1)
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
+    `
+    
+    rows, err := r.db.QueryContext(ctx, query, pq.Array(ids), limit, offset)
+    if err != nil {
+        return nil, 0, err
+    }
+    defer rows.Close()
+    
+    var users []*entities.User
+    for rows.Next() {
+        var user entities.User
+        var lastLogin sql.NullTime
+        
+        err := rows.Scan(
+            &user.ID,
+            &user.DNI,
+            &user.Email,
+            &user.FirstName,
+            &user.LastName,
+            &user.Phone,
+            &user.AvatarURL,
+            &user.Status,
+            &user.Verified,
+            &lastLogin,
+            &user.CreatedAt,
+            &user.UpdatedAt,
+        )
+        if err != nil {
+            return nil, 0, err
+        }
+        
+        if lastLogin.Valid {
+            user.LastLogin = &lastLogin.Time
+        }
+        
+        users = append(users, &user)
+    }
+    
+    return users, total, nil
+}
+
+func (r *userRepository) ListWithFilters(ctx context.Context, page, limit int, filters map[string]string) ([]*entities.User, int, error) {
+    // Base de la consulta
+    baseQuery := `FROM users WHERE 1=1`
+    countQuery := `SELECT COUNT(*) ` + baseQuery
+    listQuery := `
+        SELECT 
+            id, dni, email, password, first_name, last_name, phone, avatar_url, 
+            status, verified, last_login, created_at, updated_at
+        ` + baseQuery
+    
+    // Variables para los argumentos
+    args := []interface{}{}
+    argIndex := 1
+    
+    // Aplicar filtros
+    if status, ok := filters["status"]; ok {
+        baseQuery += fmt.Sprintf(" AND status = $%d", argIndex)
+        args = append(args, status)
+        argIndex++
+    }
+    
+    if search, ok := filters["search"]; ok {
+        // Búsqueda por nombre, apellido, email o DNI
+        baseQuery += fmt.Sprintf(` AND (
+            dni ILIKE $%d OR 
+            email ILIKE $%d OR 
+            first_name ILIKE $%d OR 
+            last_name ILIKE $%d OR
+            phone ILIKE $%d
+        )`, argIndex, argIndex, argIndex, argIndex, argIndex)
+        args = append(args, "%"+search+"%")
+        argIndex++
+    }
+    
+    // Actualizar queries con los filtros
+    countQuery = `SELECT COUNT(*) ` + baseQuery
+    listQuery = `
+        SELECT 
+            id, dni, email, password, first_name, last_name, phone, avatar_url, 
+            status, verified, last_login, created_at, updated_at
+        ` + baseQuery + ` ORDER BY created_at DESC LIMIT $` + fmt.Sprintf("%d", argIndex) + ` OFFSET $` + fmt.Sprintf("%d", argIndex+1)
+    
+    // Añadir limit y offset a los argumentos
+    args = append(args, limit, (page-1)*limit)
+    
+    // Obtener total
+    var total int
+    err := r.db.QueryRowContext(ctx, countQuery, args[:argIndex-1]...).Scan(&total)
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    // Ejecutar consulta con paginación
+    rows, err := r.db.QueryContext(ctx, listQuery, args...)
+    if err != nil {
+        return nil, 0, err
+    }
+    defer rows.Close()
+    
+    // Procesar resultados
+    var users []*entities.User
+    for rows.Next() {
+        var user entities.User
+        var lastLogin sql.NullTime
+        
+        err := rows.Scan(
+            &user.ID,
+            &user.DNI,
+            &user.Email,
+            &user.Password,
+            &user.FirstName,
+            &user.LastName,
+            &user.Phone,
+            &user.AvatarURL,
+            &user.Status,
+            &user.Verified,
+            &lastLogin,
+            &user.CreatedAt,
+            &user.UpdatedAt,
+        )
+        if err != nil {
+            return nil, 0, err
+        }
+        
+        if lastLogin.Valid {
+            user.LastLogin = &lastLogin.Time
+        }
+        
+        users = append(users, &user)
+    }
+    
+    if err = rows.Err(); err != nil {
+        return nil, 0, err
+    }
+    
+    return users, total, nil
+}
+
+func (r *userRepository) ListWithAdvancedFilters(ctx context.Context, page, limit int, filters map[string]interface{}) ([]*entities.User, int, error) {
+    // Base de la consulta
+    baseQuery := `FROM users WHERE 1=1`
+    args := []interface{}{}
+    argIndex := 1
+    
+    // Aplicar filtros
+    if status, ok := filters["status"].(string); ok && status != "" {
+        baseQuery += fmt.Sprintf(" AND status = $%d", argIndex)
+        args = append(args, status)
+        argIndex++
+    }
+    
+    if search, ok := filters["search"].(string); ok && search != "" {
+        baseQuery += fmt.Sprintf(` AND (
+            dni ILIKE $%d OR 
+            email ILIKE $%d OR 
+            first_name ILIKE $%d OR 
+            last_name ILIKE $%d OR
+            phone ILIKE $%d
+        )`, argIndex, argIndex, argIndex, argIndex, argIndex)
+        args = append(args, "%"+search+"%")
+        argIndex++
+    }
+    
+    if ids, ok := filters["ids"].([]uuid.UUID); ok && len(ids) > 0 {
+        // Usar librería pq para array de UUIDs
+        baseQuery += fmt.Sprintf(" AND id = ANY($%d)", argIndex)
+        args = append(args, pq.Array(ids))
+        argIndex++
+    }
+    
+    // Construir consultas
+    countQuery := `SELECT COUNT(*) ` + baseQuery
+    listQuery := `
+        SELECT 
+            id, dni, email, password, first_name, last_name, phone, avatar_url, 
+            status, verified, last_login, created_at, updated_at
+        ` + baseQuery + ` ORDER BY created_at DESC LIMIT $` + fmt.Sprintf("%d", argIndex) + ` OFFSET $` + fmt.Sprintf("%d", argIndex+1)
+    
+    // Añadir limit y offset
+    args = append(args, limit, (page-1)*limit)
+    
+    // Obtener total
+    var total int
+    err := r.db.QueryRowContext(ctx, countQuery, args[:argIndex-1]...).Scan(&total)
+    if err != nil {
+        return nil, 0, err
+    }
+    
+    // Ejecutar consulta con paginación
+    rows, err := r.db.QueryContext(ctx, listQuery, args...)
+    if err != nil {
+        return nil, 0, err
+    }
+    defer rows.Close()
+    
+    var users []*entities.User
+    for rows.Next() {
+        var user entities.User
+        var lastLogin sql.NullTime
+        
+        err := rows.Scan(
+            &user.ID,
+            &user.DNI,
+            &user.Email,
+            &user.Password,
+            &user.FirstName,
+            &user.LastName,
+            &user.Phone,
+            &user.AvatarURL,
+            &user.Status,
+            &user.Verified,
+            &lastLogin,
+            &user.CreatedAt,
+            &user.UpdatedAt,
+        )
+        if err != nil {
+            return nil, 0, err
+        }
+        
+        if lastLogin.Valid {
+            user.LastLogin = &lastLogin.Time
+        }
+        
+        users = append(users, &user)
+    }
+    
+    if err = rows.Err(); err != nil {
+        return nil, 0, err
+    }
+    
+    return users, total, nil
 }
