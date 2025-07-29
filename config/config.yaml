@@ -10,7 +10,7 @@
 #   conn_max_lifetime: "15m"
 
 database:
-  host: "172.20.0.4"
+  host: "86.48.26.221"
   port: "5432"
   user: "postgres"
   password: "jtorres159."
@@ -41,7 +41,7 @@ smtp:
 # Ejemplo: https://tudominio.com/api/auth/reset-password
 urls:
   reset_password: "http://0.0.0.0:3007/api/auth/reset-password"
-  verify_email: "http://0.0.0.0:3007/api/auth/verify-email"
+  verify_email: "http://localhost:3007/api/auth/verify-email"
 
 site:
   name: "Sistema de Autenticación"
@@ -51,6 +51,6 @@ site:
   support_email: "hellares98@gmail.com"
 
 rabbitmq:
-  url: "amqp://jtorres:jtorres159.@172.20.0.2:5672"
+  url: "amqp://admin:admin123@86.48.26.221:5672"
   exchange: "microservices"
   queue: "auth_queue" 
