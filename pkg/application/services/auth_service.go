@@ -48,8 +48,17 @@ type AuthService interface {
 	ListAllUsers(ctx context.Context, page, limit int, filters map[string]string) ([]*UserInfo, int, error)
 	ListUsersInEmpresa(ctx context.Context, empresaID uuid.UUID, page, limit int, filters map[string]string) ([]*UserInfo, int, error)
 
-	
+
+	// Nuevos métodos para multi-empresa
+    LoginMultiempresa(ctx context.Context, dni, password string) (*entities.User, string, error)
+    GetUserEmpresasWithRoles(ctx context.Context, userID uuid.UUID) ([]EmpresaWithRole, error)
+    UserBelongsToEmpresa(ctx context.Context, userID, empresaID uuid.UUID) (bool, error)
+    GenerateTokenWithEmpresa(ctx context.Context, userID, empresaID uuid.UUID) (string, error)
+    AssignEmpresaAdmin(ctx context.Context, userID, empresaID uuid.UUID) error // Para llamada interna
+
+	VerifyTokenWithEmpresa(ctx context.Context, token string) (*auth.TokenClaimsWithEmpresa, error)
 }
+
 
 // authServiceImpl implementa la interfaz AuthService
 type authServiceImpl struct {
@@ -105,6 +114,13 @@ type UserInfo struct {
 type EmpresaInfo struct {
     ID   uuid.UUID `json:"id"`
     Role string    `json:"role"`
+}
+
+type EmpresaWithRole struct {
+    ID          uuid.UUID `json:"id"`
+    Name        string    `json:"name"` // Esto vendrá del microservicio de empresa
+    Role        string    `json:"role"`
+    Permissions []string  `json:"permissions"`
 }
 
 // NewAuthService crea una nueva instancia del servicio de autenticación
@@ -243,6 +259,22 @@ func (s *authServiceImpl) Login(ctx context.Context, dni, password string) (stri
 }
 
 // VerifyToken verifica un token JWT y devuelve los claims
+// func (s *authServiceImpl) VerifyToken(ctx context.Context, tokenString string) (*auth.TokenClaims, error) {
+// 	// Verificar si el token existe en la base de datos
+// 	session, err := s.sessionRepo.FindByToken(ctx, tokenString)
+// 	if err != nil || session == nil || time.Now().After(session.ExpiresAt) {
+// 		return nil, errors.New("token inválido o expirado")
+// 	}
+
+// 	// Validar token usando el servicio JWT
+// 	claims, err := s.jwtService.ValidateToken(tokenString)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	return claims, nil
+// }
+
 func (s *authServiceImpl) VerifyToken(ctx context.Context, tokenString string) (*auth.TokenClaims, error) {
 	// Verificar si el token existe en la base de datos
 	session, err := s.sessionRepo.FindByToken(ctx, tokenString)
@@ -250,13 +282,25 @@ func (s *authServiceImpl) VerifyToken(ctx context.Context, tokenString string) (
 		return nil, errors.New("token inválido o expirado")
 	}
 
-	// Validar token usando el servicio JWT
+	// Primero intentar validar como token básico
 	claims, err := s.jwtService.ValidateToken(tokenString)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		return claims, nil
 	}
 
-	return claims, nil
+	// Si falla, intentar como token con empresa y convertir a TokenClaims básico
+	claimsWithEmpresa, err := s.jwtService.ValidateTokenWithEmpresa(tokenString)
+	if err != nil {
+		return nil, errors.New("token inválido")
+	}
+
+	// Convertir TokenClaimsWithEmpresa a TokenClaims para mantener compatibilidad
+	return &auth.TokenClaims{
+		UserID: claimsWithEmpresa.UserID,
+		DNI:    claimsWithEmpresa.DNI,
+		Email:  claimsWithEmpresa.Email,
+		RegisteredClaims: claimsWithEmpresa.RegisteredClaims,
+	}, nil
 }
 
 // GetUserByID obtiene un usuario por su ID
@@ -848,4 +892,198 @@ func (s *authServiceImpl) ListUsersInEmpresa(ctx context.Context, empresaID uuid
     }
     
     return userInfos, total, nil
+}
+
+// Implementación en authServiceImpl
+func (s *authServiceImpl) LoginMultiempresa(ctx context.Context, dni, password string) (*entities.User, string, error) {
+    // Buscar usuario por DNI
+    user, err := s.userRepo.FindByDNI(ctx, dni)
+    if err != nil {
+        return nil, "", errors.New("credenciales inválidas")
+    }
+
+    // Verificar contraseña
+    if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
+        return nil, "", errors.New("credenciales inválidas")
+    }
+
+    // Crear token básico (sin empresa específica)
+    claims := &auth.TokenClaims{
+        UserID: user.ID.String(),
+        DNI:    user.DNI,
+        Email:  user.Email,
+        RegisteredClaims: jwt.RegisteredClaims{
+            ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.tokenExpiration)),
+        },
+    }
+
+    token, err := s.jwtService.GenerateToken(claims)
+    if err != nil {
+        return nil, "", fmt.Errorf("error al generar el token: %v", err)
+    }
+
+    // Crear sesión
+    session := &entities.Session{
+        ID:        uuid.New(),
+        UserID:    user.ID,
+        Token:     token,
+        ExpiresAt: time.Now().Add(s.tokenExpiration),
+        CreatedAt: time.Now(),
+    }
+
+    if err := s.sessionRepo.Create(ctx, session); err != nil {
+        return nil, "", fmt.Errorf("error al crear la sesión: %v", err)
+    }
+
+    return user, token, nil
+}
+
+func (s *authServiceImpl) GetUserEmpresasWithRoles(ctx context.Context, userID uuid.UUID) ([]EmpresaWithRole, error) {
+    // Obtener todas las empresas del usuario
+    empresaIDs, err := s.userEmpresaRoleRepo.FindEmpresasByUserID(ctx, userID)
+    if err != nil {
+        return nil, err
+    }
+
+    var empresasWithRoles []EmpresaWithRole
+    
+    for _, empresaID := range empresaIDs {
+        // Obtener roles del usuario en esta empresa
+        roles, err := s.GetUserRoles(ctx, userID, empresaID)
+        if err != nil {
+            log.Printf("Error obteniendo roles para empresa %s: %v", empresaID, err)
+            continue
+        }
+
+        // Determinar el rol principal (el de mayor jerarquía)
+        principalRole := determinePrincipalRole(roles)
+        
+        // Obtener permisos
+        var allPermissions []string
+        for _, role := range roles {
+            permissions, err := s.GetPermissionsByRole(ctx, role.ID)
+            if err != nil {
+                continue
+            }
+            for _, perm := range permissions {
+                allPermissions = append(allPermissions, perm.Name)
+            }
+        }
+
+        empresasWithRoles = append(empresasWithRoles, EmpresaWithRole{
+            ID:          empresaID,
+            Name:        "", // Esto se completará con llamada al microservicio de empresa
+            Role:        principalRole,
+            Permissions: uniqueStrings(allPermissions),
+        })
+    }
+
+    return empresasWithRoles, nil
+}
+
+func (s *authServiceImpl) UserBelongsToEmpresa(ctx context.Context, userID, empresaID uuid.UUID) (bool, error) {
+    roles, err := s.userEmpresaRoleRepo.FindByUserAndEmpresa(ctx, userID, empresaID)
+    if err != nil {
+        return false, err
+    }
+    
+    // Verificar si tiene al menos un rol activo
+    for _, role := range roles {
+        if role.Active {
+            return true, nil
+        }
+    }
+    
+    return false, nil
+}
+
+func (s *authServiceImpl) GenerateTokenWithEmpresa(ctx context.Context, userID, empresaID uuid.UUID) (string, error) {
+    user, err := s.userRepo.FindByID(ctx, userID)
+    if err != nil {
+        return "", err
+    }
+
+    // Crear claims con empresa específica
+    claims := &auth.TokenClaimsWithEmpresa{
+        UserID:    user.ID.String(),
+        DNI:       user.DNI,
+        Email:     user.Email,
+        EmpresaID: empresaID.String(), // Agregar empresa al token
+        RegisteredClaims: jwt.RegisteredClaims{
+            ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.tokenExpiration)),
+        },
+    }
+
+    return s.jwtService.GenerateTokenWithEmpresa(claims)
+}
+
+func (s *authServiceImpl) AssignEmpresaAdmin(ctx context.Context, userID, empresaID uuid.UUID) error {
+    // Buscar el rol de administrador de empresa
+    adminRole, err := s.roleRepo.FindByName(ctx, "EMPRESA_ADMIN")
+    if err != nil {
+        return fmt.Errorf("rol EMPRESA_ADMIN no encontrado: %v", err)
+    }
+
+    // Asignar rol al usuario
+    userEmpresaRole := &entities.UserEmpresaRole{
+        ID:        uuid.New(),
+        UserID:    userID,
+        EmpresaID: empresaID,
+        RoleID:    adminRole.ID,
+        Active:    true,
+        CreatedAt: time.Now(),
+        UpdatedAt: time.Now(),
+    }
+
+    return s.userEmpresaRoleRepo.Create(ctx, userEmpresaRole)
+}
+
+// Funciones auxiliares
+func determinePrincipalRole(roles []*entities.Role) string {
+    // Jerarquía de roles (de mayor a menor)
+    hierarchy := []string{"EMPRESA_ADMIN", "ADMIN_USERS", "EMPLOYEE", "CLIENTE", "VIEWER"}
+    
+    for _, hierarchyRole := range hierarchy {
+        for _, userRole := range roles {
+            if userRole.Name == hierarchyRole {
+                return hierarchyRole
+            }
+        }
+    }
+    
+    if len(roles) > 0 {
+        return roles[0].Name
+    }
+    
+    return "VIEWER"
+}
+
+func uniqueStrings(slice []string) []string {
+    keys := make(map[string]bool)
+    var result []string
+    
+    for _, item := range slice {
+        if !keys[item] {
+            keys[item] = true
+            result = append(result, item)
+        }
+    }
+    
+    return result
+}
+
+func (s *authServiceImpl) VerifyTokenWithEmpresa(ctx context.Context, tokenString string) (*auth.TokenClaimsWithEmpresa, error) {
+	// Verificar si el token existe en la base de datos
+	session, err := s.sessionRepo.FindByToken(ctx, tokenString)
+	if err != nil || session == nil || time.Now().After(session.ExpiresAt) {
+		return nil, errors.New("token inválido o expirado")
+	}
+
+	// Validar token específico de empresa usando el servicio JWT
+	claims, err := s.jwtService.ValidateTokenWithEmpresa(tokenString)
+	if err != nil {
+		return nil, err
+	}
+
+	return claims, nil
 }

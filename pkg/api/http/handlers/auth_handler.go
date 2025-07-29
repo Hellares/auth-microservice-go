@@ -184,6 +184,16 @@ func (h *AuthHandler) RegisterRoutes(router *mux.Router) {
     router.HandleFunc("/empresa/{empresaId}/all-users", h.ListAllUsersInEmpresa).Methods("GET")
 		 //Queries("page", "{page:[0-9]*}", "limit", "{limit:[0-9]*}", "role", "{role:.*}") // Añadido para obtener usuarios por empresa
 
+    // Nuevas rutas para multi-empresa
+    router.HandleFunc("/select-empresa", h.SelectEmpresa).Methods("POST")
+    router.HandleFunc("/switch-empresa", h.SelectEmpresa).Methods("POST") // Alias
+    
+    // Ruta interna para comunicación entre microservicios
+    internalRouter := router.PathPrefix("/internal").Subrouter()
+    internalRouter.HandleFunc("/assign-empresa-admin", h.AssignEmpresaAdminInternal).Methods("POST")
+    // internalRouter.HandleFunc("/remove-user-from-empresa", h.RemoveUserFromEmpresaInternal).Methods("POST")
+    internalRouter.HandleFunc("/get-user-empresas", h.GetUserEmpresasInternal).Methods("GET")
+
 }
 
 // Register maneja el registro de nuevos usuarios
@@ -228,40 +238,106 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 // Login maneja el inicio de sesión
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
-	// Estructura para la petición
 	var req struct {
 		DNI      string `json:"dni"`
 		Password string `json:"password"`
 	}
 
-	// Decodificar JSON
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondWithError(w, http.StatusBadRequest, "Petición inválida")
 		return
 	}
 
-	// Validar datos
 	if req.DNI == "" || req.Password == "" {
 		respondWithError(w, http.StatusBadRequest, "DNI y contraseña son requeridos")
 		return
 	}
 
-	// Iniciar sesión
-	token, err := h.authService.Login(r.Context(), req.DNI, req.Password)
+	// Autenticar usuario
+	user, token, err := h.authService.LoginMultiempresa(r.Context(), req.DNI, req.Password)
 	if err != nil {
 		respondWithError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 
-	// Responder con token
+	// Obtener empresas del usuario
+	empresas, err := h.authService.GetUserEmpresasWithRoles(r.Context(), user.ID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error obteniendo empresas")
+		return
+	}
+
+	// Verificar si es SUPER_ADMIN del sistema
+	isSuperAdmin, _ := h.authService.HasSystemRole(r.Context(), user.ID, "SUPER_ADMIN")
+
+	// Respuesta completa
 	respondWithJSON(w, http.StatusOK, Response{
 		Success: true,
-		Data: map[string]string{
-			"token": token,
+		Data: map[string]interface{}{
+			"token":        token,
+			"user":         user,
+			"empresas":     empresas,
+			"isSuperAdmin": isSuperAdmin,
+			"needsEmpresaSelection": len(empresas) > 1, // Si tiene múltiples empresas
 		},
 	})
 }
+
+func (h *AuthHandler) SelectEmpresa(w http.ResponseWriter, r *http.Request) {
+	token := extractToken(r)
+	if token == "" {
+		respondWithError(w, http.StatusUnauthorized, "No autorizado")
+		return
+	}
+
+	claims, err := h.authService.VerifyToken(r.Context(), token)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	var req struct {
+		EmpresaID uuid.UUID `json:"empresaId"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Petición inválida")
+		return
+	}
+
+	userID := uuid.MustParse(claims.UserID)
+
+	// Verificar que el usuario pertenece a esa empresa
+	hasAccess, err := h.authService.UserBelongsToEmpresa(r.Context(), userID, req.EmpresaID)
+	if err != nil || !hasAccess {
+		respondWithError(w, http.StatusForbidden, "No tienes acceso a esta empresa")
+		return
+	}
+
+	// Generar nuevo token con empresa seleccionada
+	newToken, err := h.authService.GenerateTokenWithEmpresa(r.Context(), userID, req.EmpresaID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error generando token")
+		return
+	}
+
+	// Obtener roles y permisos para la empresa seleccionada
+	roles, err := h.authService.GetUserRoles(r.Context(), userID, req.EmpresaID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error obteniendo roles")
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, Response{
+		Success: true,
+		Data: map[string]interface{}{
+			"token":     newToken,
+			"empresaId": req.EmpresaID,
+			"roles":     roles,
+		},
+	})
+}
+
 
 // VerifyEmail verifica el email de un usuario
 func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
@@ -1542,4 +1618,55 @@ func (h *AuthHandler) ListAllUsersInEmpresa(w http.ResponseWriter, r *http.Reque
     }
     
     respondWithPaginatedJSON(w, http.StatusOK, response)
+}
+
+func (h *AuthHandler) AssignEmpresaAdminInternal(w http.ResponseWriter, r *http.Request) {
+    // Verificar que la llamada viene de un microservicio interno
+    // (implementar autenticación de servicio a servicio)
+    
+    var req struct {
+        UserID    uuid.UUID `json:"userId"`
+        EmpresaID uuid.UUID `json:"empresaId"`
+    }
+
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        respondWithError(w, http.StatusBadRequest, "Petición inválida")
+        return
+    }
+
+    if err := h.authService.AssignEmpresaAdmin(r.Context(), req.UserID, req.EmpresaID); err != nil {
+        respondWithError(w, http.StatusInternalServerError, err.Error())
+        return
+    }
+
+    respondWithJSON(w, http.StatusOK, Response{
+        Success: true,
+        Message: "Administrador de empresa asignado correctamente",
+    })
+}
+
+// Handler interno para obtener empresas de un usuario
+func (h *AuthHandler) GetUserEmpresasInternal(w http.ResponseWriter, r *http.Request) {
+    userIDStr := r.URL.Query().Get("userId")
+    if userIDStr == "" {
+        respondWithError(w, http.StatusBadRequest, "userId requerido")
+        return
+    }
+
+    userID, err := uuid.Parse(userIDStr)
+    if err != nil {
+        respondWithError(w, http.StatusBadRequest, "userId inválido")
+        return
+    }
+
+    empresas, err := h.authService.GetUserEmpresasWithRoles(r.Context(), userID)
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, err.Error())
+        return
+    }
+
+    respondWithJSON(w, http.StatusOK, Response{
+        Success: true,
+        Data:    empresas,
+    })
 }
